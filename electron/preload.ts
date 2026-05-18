@@ -22,4 +22,6 @@ contextBridge.exposeInMainWorld("todoAI", {
     ipcRenderer.on("ollama:pull-progress", listener);
     return () => ipcRenderer.removeListener("ollama:pull-progress", listener);
   },
+  scheduleTaskNotifications: (tasks: unknown[], settings: unknown) => ipcRenderer.invoke("notifications:schedule", tasks, settings),
+  showTestNotification: () => ipcRenderer.invoke("notifications:test"),
 });

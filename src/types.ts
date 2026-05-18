@@ -16,6 +16,7 @@ export type ThemeMode = "dark" | "light" | "system";
 export type AIProvider = "ollama" | "openai";
 export type Language = "en" | "ru";
 export type AIMode = "plan_day" | "create_tasks";
+export type ReminderOffsetMinutes = 0 | 5 | 10 | 30 | 60;
 
 export interface Subtask {
   id: string;
@@ -90,6 +91,8 @@ export interface UserSettings {
   localModel: string;
   apiKey: string;
   notifications: boolean;
+  defaultReminderMinutes: ReminderOffsetMinutes;
+  onboardingCompleted: boolean;
   startupBehavior: "dashboard" | "today" | "last-view";
   autoPlanDay: boolean;
 }

@@ -7,6 +7,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { Dashboard } from "./components/Dashboard";
 import { EmptyState } from "./components/EmptyState";
 import { SettingsPage } from "./components/SettingsPage";
+import { OnboardingFlow } from "./components/OnboardingFlow";
 import { TaskModal } from "./components/TaskModal";
 import { TaskList } from "./components/TaskList";
 import { VisualizationView } from "./components/VisualizationView";
@@ -27,6 +28,8 @@ const defaultSettings: UserSettings = {
   localModel: "llama3.1:latest",
   apiKey: "",
   notifications: true,
+  defaultReminderMinutes: 0,
+  onboardingCompleted: false,
   startupBehavior: "dashboard",
   autoPlanDay: true,
 };
@@ -94,6 +97,13 @@ export function App() {
   useEffect(() => {
     saveProjects(appProjects);
   }, [appProjects]);
+
+  useEffect(() => {
+    void window.todoAI?.scheduleTaskNotifications(tasks, {
+      enabled: settings.notifications,
+      defaultReminderMinutes: settings.defaultReminderMinutes,
+    });
+  }, [settings.defaultReminderMinutes, settings.notifications, tasks]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -317,6 +327,16 @@ export function App() {
           />
         )}
       </AppShell>
+
+      {!settings.onboardingCompleted && (
+        <OnboardingFlow
+          projects={appProjects}
+          settings={settings}
+          onAddTask={addTask}
+          onComplete={() => updateSettings({ onboardingCompleted: true })}
+          updateSettings={updateSettings}
+        />
+      )}
 
       <CommandPalette
         isOpen={isCommandOpen}

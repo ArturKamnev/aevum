@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Todo AI desktop productivity assistant",
+  "author": "ArturKamnev",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "tsc -p electron/tsconfig.json && concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron .\"",
@@ -51,16 +52,18 @@
     }
   },
   "dependencies": {
+    "@gsap/react": "^2.1.2",
     "electron-updater": "^6.8.3",
+    "gsap": "^3.15.0",
     "lucide-react": "^0.556.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^5.1.1",
     "@types/node": "^24.10.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
     "concurrently": "^9.2.1",
     "electron": "^39.2.7",
     "electron-builder": "^26.8.1",

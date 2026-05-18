@@ -15,6 +15,8 @@ interface Window {
     pullOllamaModel: (modelName: string) => Promise<{ ok: boolean; modelName?: string; status?: string; message?: string }>;
     cancelOllamaPull: () => Promise<{ ok: boolean }>;
     onOllamaPullProgress: (callback: (payload: OllamaPullProgress) => void) => () => void;
+    scheduleTaskNotifications: (tasks: NotificationTaskPayload[], settings: NotificationSettingsPayload) => Promise<{ ok: boolean; scheduled: number }>;
+    showTestNotification: () => Promise<{ ok: boolean; supported: boolean }>;
   };
 }
 
@@ -44,4 +46,17 @@ type OllamaPullProgress = {
   percent?: number;
   message?: string;
   type?: string;
+};
+
+type NotificationTaskPayload = {
+  id: string;
+  title: string;
+  description?: string;
+  status: "active" | "completed";
+  scheduledAt: string | null;
+};
+
+type NotificationSettingsPayload = {
+  enabled: boolean;
+  defaultReminderMinutes: 0 | 5 | 10 | 30 | 60;
 };

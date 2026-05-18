@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Bell,
   Check,
   CheckCircle2,
   Cpu,
@@ -12,13 +13,14 @@ import {
   Monitor,
   Moon,
   PackageCheck,
+  PlayCircle,
   RefreshCw,
   RotateCcw,
   Sun,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
-import type { Language, ThemeMode, UserSettings } from "../types";
+import type { Language, ReminderOffsetMinutes, ThemeMode, UserSettings } from "../types";
 
 interface SettingsPageProps {
   clearAiHistory: () => void;
@@ -30,7 +32,13 @@ type SetupStatus = OllamaSetupStatus;
 type UpdateStatus = UpdateCheckResult;
 type PullState = "idle" | "loading" | "success" | "error";
 
-const recommendedModels = ["llama3.1:latest", "llama3.2:latest", "mistral:latest"];
+const smartModels = [
+  { name: "llama3.1:latest", descriptionKey: "settings.smartModel.llama31" },
+  { name: "llama3.2:latest", descriptionKey: "settings.smartModel.llama32" },
+  { name: "mistral:latest", descriptionKey: "settings.smartModel.mistral" },
+  { name: "qwen2.5:latest", descriptionKey: "settings.smartModel.qwen" },
+  { name: "deepseek-r1:latest", descriptionKey: "settings.smartModel.deepseek" },
+] as const;
 
 export function SettingsPage({ clearAiHistory, settings, updateSettings }: SettingsPageProps) {
   const { language, languageNames, setLanguage, t } = useI18n();
@@ -40,8 +48,10 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const [showAdvancedAI, setShowAdvancedAI] = useState(false);
   const [customModel, setCustomModel] = useState(settings.localModel);
   const [pullState, setPullState] = useState<PullState>("idle");
+  const [installingModel, setInstallingModel] = useState("");
   const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
   const [pullMessage, setPullMessage] = useState("");
+  const [notificationStatus, setNotificationStatus] = useState("");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ status: "idle" });
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [cacheStatus, setCacheStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
@@ -51,7 +61,6 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const installedModels = ollamaStatus?.models ?? [];
   const selectedModelInstalled = ollamaStatus?.selectedModelInstalled ?? installedModels.some((model) => model.name === settings.localModel);
   const missingSelectedModel = Boolean(ollamaStatus && ollamaStatus.status === "model-missing");
-  const primaryRecommendedModel = recommendedModels.includes(settings.localModel) ? settings.localModel : recommendedModels[0];
 
   useEffect(() => {
     if (settings.aiProvider !== "ollama") updateSettings({ aiProvider: "ollama", apiKey: "" });
@@ -73,6 +82,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
       if (payload.status) setPullMessage(payload.status);
       if (payload.status === "success") {
         setPullState("success");
+        setInstallingModel("");
         void refreshOllamaStatus(false);
       }
       if (payload.status === "error") setPullState("error");
@@ -121,18 +131,26 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
 
   async function handlePullModel(modelName: string) {
     setPullState("loading");
+    setInstallingModel(modelName);
     setPullMessage(t("settings.installingModel"));
     setPullProgress(null);
     const result = await window.todoAI?.pullOllamaModel(modelName);
     if (!result?.ok) {
       setPullState("error");
       setPullMessage(result?.message ?? t("settings.modelInstallFailed"));
+      setInstallingModel("");
       return;
     }
     setPullState("success");
+    setInstallingModel("");
     setPullMessage(t("settings.modelInstalled"));
     updateSettings({ localModel: modelName });
     await refreshOllamaStatus(false);
+  }
+
+  async function handleTestNotification() {
+    const result = await window.todoAI?.showTestNotification();
+    setNotificationStatus(result?.ok ? t("settings.testNotificationSent") : t("settings.testNotificationFailed"));
   }
 
   async function handleCheckForUpdates() {
@@ -298,6 +316,47 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
           </select>
         </label>
 
+        <div className="recommended-models smart-models">
+          <div>
+            <strong>{t("settings.smartModels")}</strong>
+            <p>{t("settings.smartModelsDescription")}</p>
+          </div>
+          <div className="smart-model-list">
+            {smartModels.map((model) => {
+              const installed = installedModels.some((installedModel) => modelMatches(installedModel.name, model.name));
+              const selected = modelMatches(settings.localModel, model.name);
+              const isInstallingThis = pullState === "loading" && installingModel === model.name;
+              return (
+                <article className="smart-model" key={model.name}>
+                  <div>
+                    <div className="smart-model__header">
+                      <strong>{model.name}</strong>
+                      {selected ? <span className="status-pill status-pill--connected">{t("settings.selected")}</span> : installed ? <span className="status-pill">{t("settings.installed")}</span> : null}
+                    </div>
+                    <p>{t(model.descriptionKey)}</p>
+                  </div>
+                  {installed ? (
+                    <button className="button button--secondary" onClick={() => updateSettings({ localModel: model.name })} type="button">
+                      <Check size={16} />
+                      {selected ? t("settings.selected") : t("settings.useModel")}
+                    </button>
+                  ) : (
+                    <button
+                      className="button button--secondary"
+                      disabled={pullState === "loading" || ollamaStatus?.status === "not-installed"}
+                      onClick={() => void handlePullModel(model.name)}
+                      type="button"
+                    >
+                      {isInstallingThis ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
+                      {t("settings.installModel")}
+                    </button>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </div>
+
         {missingSelectedModel || !installedModels.length ? (
           <div className="recommended-models">
             <div>
@@ -305,16 +364,16 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
               <p>{t("settings.recommendedModelsDescription")}</p>
             </div>
             <div className="model-install-list">
-              {recommendedModels.map((model) => (
+              {smartModels.slice(0, 3).map((model) => (
                 <button
                   className="button button--secondary"
                   disabled={pullState === "loading" || ollamaStatus?.status === "not-installed"}
-                  key={model}
-                  onClick={() => void handlePullModel(model)}
+                  key={model.name}
+                  onClick={() => void handlePullModel(model.name)}
                   type="button"
                 >
-                  {pullState === "loading" && primaryRecommendedModel === model ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
-                  {t("settings.installModel")} {model}
+                  {pullState === "loading" && installingModel === model.name ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
+                  {t("settings.installModel")} {model.name}
                 </button>
               ))}
             </div>
@@ -369,6 +428,10 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
           </div>
         </div>
         <div className="ai-settings-actions">
+          <button className="button button--secondary" onClick={() => updateSettings({ onboardingCompleted: false })} type="button">
+            <PlayCircle size={16} />
+            {t("settings.runOnboardingAgain")}
+          </button>
           <button className="button button--secondary" disabled={isCheckingUpdates || updateStatus.status === "checking"} onClick={() => void handleCheckForUpdates()} type="button">
             {isCheckingUpdates || updateStatus.status === "checking" ? <Loader2 size={16} className="spin-icon" /> : <RefreshCw size={16} />}
             {t("settings.checkForUpdates")}
@@ -389,14 +452,37 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         {updateStatus.message ? <p className="settings-helper-inline">{updateStatus.message}</p> : null}
       </SettingsSection>
 
-      <SettingsSection icon={Monitor} title={t("settings.notificationsStartup")} description={t("settings.notificationsStartupDescription")}>
+      <SettingsSection icon={Bell} title={t("settings.notifications")} description={t("settings.notificationsSectionDescription")}>
         <label className="toggle-row">
           <span>
-            <strong>{t("settings.notifications")}</strong>
+            <strong>{t("settings.enableNotifications")}</strong>
             <small>{t("settings.notificationsDescription")}</small>
           </span>
           <input checked={settings.notifications} onChange={(event) => updateSettings({ notifications: event.target.checked })} type="checkbox" />
         </label>
+        <label className="field-row">
+          <span>{t("settings.defaultReminder")}</span>
+          <select
+            value={settings.defaultReminderMinutes}
+            onChange={(event) => updateSettings({ defaultReminderMinutes: Number(event.target.value) as ReminderOffsetMinutes })}
+          >
+            <option value={0}>{t("settings.reminderAtTime")}</option>
+            <option value={5}>{t("settings.reminder5")}</option>
+            <option value={10}>{t("settings.reminder10")}</option>
+            <option value={30}>{t("settings.reminder30")}</option>
+            <option value={60}>{t("settings.reminder60")}</option>
+          </select>
+        </label>
+        <div className="ai-settings-actions">
+          <button className="button button--secondary" disabled={!settings.notifications} onClick={() => void handleTestNotification()} type="button">
+            <Bell size={16} />
+            {t("settings.testNotification")}
+          </button>
+          {notificationStatus ? <span className="settings-helper-inline">{notificationStatus}</span> : null}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection icon={Monitor} title={t("settings.notificationsStartup")} description={t("settings.notificationsStartupDescription")}>
         <label className="toggle-row">
           <span>
             <strong>{t("settings.autoPlanDay")}</strong>
@@ -515,4 +601,8 @@ function formatUpdateStatus(status: UpdateStatus, t: ReturnType<typeof useI18n>[
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function modelMatches(installedModel: string, selectedModel: string) {
+  return installedModel === selectedModel || installedModel.replace(/:latest$/, "") === selectedModel || selectedModel.replace(/:latest$/, "") === installedModel;
 }

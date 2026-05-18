@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, session, shell } from "electron";
+import { app, BrowserWindow, ipcMain, nativeTheme, Notification, session, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
@@ -7,7 +7,18 @@ import path from "node:path";
 
 const isDev = !app.isPackaged;
 const ollamaDownloadUrl = "https://ollama.com/download";
-const recommendedModels = new Set(["llama3.1:latest", "llama3.2:latest", "mistral:latest", "llama3.1", "llama3.2", "mistral"]);
+const recommendedModels = new Set([
+  "llama3.1:latest",
+  "llama3.2:latest",
+  "mistral:latest",
+  "qwen2.5:latest",
+  "deepseek-r1:latest",
+  "llama3.1",
+  "llama3.2",
+  "mistral",
+  "qwen2.5",
+  "deepseek-r1",
+]);
 
 type UpdateStatus = "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error" | "unavailable";
 type OllamaStatus = "connected" | "model-missing" | "not-running" | "not-installed";
@@ -18,8 +29,20 @@ interface OllamaModel {
   size?: number;
 }
 
+interface NotificationTaskPayload {
+  id: string;
+  title: string;
+  description?: string;
+  status: "active" | "completed";
+  scheduledAt: string | null;
+}
+
+type ReminderOffsetMinutes = 0 | 5 | 10 | 30 | 60;
+
 let updateState: { status: UpdateStatus; message?: string; version?: string; progress?: number } = { status: "idle" };
 let activePull: ChildProcessWithoutNullStreams | null = null;
+const notificationTimers = new Map<string, NodeJS.Timeout>();
+const firedNotifications = new Set<string>();
 
 autoUpdater.autoDownload = false;
 autoUpdater.autoInstallOnAppQuit = false;
@@ -85,6 +108,13 @@ app.whenReady().then(() => {
     activePull = null;
     return { ok: true };
   });
+  ipcMain.handle("notifications:schedule", (_event, tasks?: unknown, settings?: unknown) => {
+    return scheduleTaskNotifications(tasks, settings);
+  });
+  ipcMain.handle("notifications:test", () => showTaskNotification({
+    title: "Todo AI",
+    body: "Notifications are ready.",
+  }));
   createWindow();
 
   app.on("activate", () => {
@@ -139,6 +169,89 @@ function setUpdateState(nextState: typeof updateState) {
   updateState = nextState;
   broadcast("updates:status", updateState);
   return updateState;
+}
+
+function scheduleTaskNotifications(tasks: unknown, settings: unknown) {
+  for (const timer of notificationTimers.values()) {
+    clearTimeout(timer);
+  }
+  notificationTimers.clear();
+
+  const parsedSettings = readNotificationSettings(settings);
+  if (!parsedSettings.enabled) return { ok: true, scheduled: 0 };
+  if (!Array.isArray(tasks)) return { ok: false, scheduled: 0 };
+
+  const now = Date.now();
+  let scheduled = 0;
+
+  for (const item of tasks) {
+    const task = readNotificationTask(item);
+    if (!task || task.status === "completed") continue;
+    const scheduledAt = readScheduledDate(task.scheduledAt);
+    if (!scheduledAt) continue;
+
+    const notifyAt = scheduledAt.getTime() - parsedSettings.defaultReminderMinutes * 60_000;
+    if (notifyAt <= now) continue;
+
+    const key = `${task.id}:${task.scheduledAt}:${parsedSettings.defaultReminderMinutes}`;
+    if (firedNotifications.has(key)) continue;
+
+    const timer = setTimeout(() => {
+      firedNotifications.add(key);
+      notificationTimers.delete(key);
+      void showTaskNotification({
+        title: task.title,
+        body: parsedSettings.defaultReminderMinutes === 0
+          ? "Scheduled now"
+          : `${parsedSettings.defaultReminderMinutes} minutes before scheduled time`,
+      });
+    }, Math.min(notifyAt - now, 2_147_483_647));
+
+    notificationTimers.set(key, timer);
+    scheduled += 1;
+  }
+
+  return { ok: true, scheduled };
+}
+
+function showTaskNotification({ title, body }: { title: string; body: string }) {
+  if (!Notification.isSupported()) return { ok: false, supported: false };
+  const notification = new Notification({
+    title,
+    body,
+    silent: false,
+  });
+  notification.show();
+  return { ok: true, supported: true };
+}
+
+function readNotificationSettings(value: unknown) {
+  if (!isRecord(value)) return { enabled: false, defaultReminderMinutes: 0 as ReminderOffsetMinutes };
+  return {
+    enabled: value.enabled === true,
+    defaultReminderMinutes: readReminderOffset(value.defaultReminderMinutes),
+  };
+}
+
+function readNotificationTask(value: unknown): NotificationTaskPayload | null {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.title !== "string") return null;
+  return {
+    id: value.id,
+    title: value.title.slice(0, 120),
+    description: typeof value.description === "string" ? value.description.slice(0, 240) : "",
+    status: value.status === "completed" ? "completed" : "active",
+    scheduledAt: typeof value.scheduledAt === "string" ? value.scheduledAt : null,
+  };
+}
+
+function readReminderOffset(value: unknown): ReminderOffsetMinutes {
+  return value === 5 || value === 10 || value === 30 || value === 60 ? value : 0;
+}
+
+function readScheduledDate(value: string | null) {
+  if (!value) return null;
+  const dateValue = value.includes("T") ? new Date(value) : new Date(`${value}T09:00:00`);
+  return Number.isNaN(dateValue.getTime()) ? null : dateValue;
 }
 
 async function checkOllamaStatus(selectedModel: string, baseUrl = "http://localhost:11434") {
