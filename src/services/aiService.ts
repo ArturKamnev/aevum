@@ -1,9 +1,9 @@
-import type { AIMode, AssistantMessage, RepeatRule, Task, UserSettings } from "../types";
-import { getTodayISO, normalizeScheduledAt } from "../utils/date";
+import type { AIMode, AssistantMessage, AvailabilityBlock, ReminderOffsetMinutes, RepeatRule, Task, UserSettings } from "../types";
+import { getScheduleDate, getScheduleTime, getTodayISO, normalizeScheduledAt } from "../utils/date";
 import { defaultRepeat, normalizeRepeat } from "../utils/recurrence";
 
 export type AIConnectionStatus = "idle" | "connected" | "not-connected" | "model-missing";
-type StructuredSchema = "create_tasks" | "plan_day" | "create_subtasks";
+type StructuredSchema = "create_tasks" | "plan_day" | "replan_tasks" | "create_subtasks";
 
 export interface AIModelInfo {
   name: string;
@@ -23,6 +23,7 @@ export interface AITaskDraft {
   description?: string;
   scheduledAt?: string | null;
   durationMinutes?: number | null;
+  reminderMinutes?: ReminderOffsetMinutes | null;
   repeat?: RepeatRule;
   projectName?: string;
   tags?: string[];
@@ -33,7 +34,20 @@ export interface CreateTasksAction {
   tasks: AITaskDraft[];
 }
 
-export type AssistantAction = CreateTasksAction;
+export interface ScheduleChangeDraft {
+  taskId: string;
+  scheduledAt: string;
+  durationMinutes?: number | null;
+  reason?: string;
+}
+
+export interface ScheduleTasksAction {
+  type: "schedule_tasks";
+  mode: "plan_day" | "replan_tasks";
+  changes: ScheduleChangeDraft[];
+}
+
+export type AssistantAction = CreateTasksAction | ScheduleTasksAction;
 
 export interface AIChatResult {
   message: AssistantMessage;
@@ -49,6 +63,7 @@ interface PlanBlock {
 interface PlanDayResult {
   userMessage: string;
   plan: PlanBlock[];
+  action?: ScheduleTasksAction;
 }
 
 interface SubtasksResult {
@@ -66,7 +81,14 @@ export class AIProviderError extends Error {
       | "cors_blocked"
       | "unexpected_response"
       | "invalid_ai_response"
-      | "provider_not_supported",
+      | "provider_not_supported"
+      | "openrouter_missing_key"
+      | "openrouter_invalid_key"
+      | "openrouter_billing_issue"
+      | "openrouter_model_unavailable"
+      | "openrouter_rate_limited"
+      | "openrouter_offline"
+      | "openrouter_provider_error",
     public readonly debug?: Record<string, string | number | boolean | undefined>,
   ) {
     super(message);
@@ -81,17 +103,30 @@ export async function chatWithAssistant(
   mode: AIMode,
 ): Promise<AIChatResult> {
   if (mode === "plan_day") {
-    const raw = await requestOllamaChat(settings, [
-      { role: "system", content: buildPlanPrompt(taskContext, settings.language) },
+    const raw = await requestAIChat(settings, [
+      { role: "system", content: buildPlanPrompt(taskContext, settings.availabilityBlocks, settings.language) },
       { role: "user", content: userMessage },
     ], { json: true });
-    const plan = await parseOrRepairStructured(raw, "plan_day", settings, validatePlanDayResult);
+    const plan = await parseOrRepairStructured(raw, "plan_day", settings, (value) => validatePlanDayResult(value, taskContext, settings.availabilityBlocks));
     return {
       message: createAssistantMessage(renderPlanMessage(plan, settings.language)),
+      action: plan.action,
     };
   }
 
-  const raw = await requestOllamaChat(settings, [
+  if (mode === "replan_tasks") {
+    const raw = await requestAIChat(settings, [
+      { role: "system", content: buildReplanPrompt(taskContext, settings.availabilityBlocks, settings.language) },
+      { role: "user", content: userMessage },
+    ], { json: true });
+    const plan = await parseOrRepairStructured(raw, "replan_tasks", settings, (value) => validatePlanDayResult(value, taskContext, settings.availabilityBlocks, "replan_tasks"));
+    return {
+      message: createAssistantMessage(renderPlanMessage(plan, settings.language)),
+      action: plan.action,
+    };
+  }
+
+  const raw = await requestAIChat(settings, [
     { role: "system", content: buildCreateTasksPrompt(taskContext, settings.language) },
     { role: "user", content: userMessage },
   ], { json: true });
@@ -104,7 +139,7 @@ export async function chatWithAssistant(
 }
 
 export async function breakDownTaskWithAI(task: Task, settings: UserSettings): Promise<string[]> {
-  const raw = await requestOllamaChat(settings, [
+  const raw = await requestAIChat(settings, [
     { role: "system", content: buildBreakdownPrompt(task, settings.language) },
     { role: "user", content: `Break this task into practical subtasks: ${task.title}\n\n${task.description}` },
   ], { json: true });
@@ -235,18 +270,55 @@ async function requestOllamaChat(
   return readOllamaMessage(payload);
 }
 
+async function requestAIChat(
+  settings: UserSettings,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  options: { json?: boolean } = {},
+) {
+  if (settings.aiProvider === "openrouter") {
+    const result = await window.todoAI?.chatOpenRouter({ messages, model: settings.cloudModel, json: options.json });
+    if (!result?.ok) throw openRouterError(result);
+    if (!result.content) throw new AIProviderError("The AI provider returned an unexpected response.", "unexpected_response");
+    logAIDebug("Received OpenRouter assistant content", {
+      provider: "openrouter",
+      model: result.model ?? settings.cloudModel,
+      rawAssistantContent: result.content,
+    });
+    return result.content;
+  }
+  return requestOllamaChat(settings, messages.filter((message) => message.role !== "assistant") as Array<{ role: "system" | "user"; content: string }>, options);
+}
+
+function openRouterError(result: OpenRouterResult | undefined) {
+  const debug = {
+    provider: "openrouter",
+    status: result?.status,
+    httpStatus: result?.httpStatus,
+    message: result?.message,
+  };
+  if (result?.status === "missing-key") return new AIProviderError("Add an OpenRouter API key in Settings.", "openrouter_missing_key", debug);
+  if (result?.status === "invalid-key") return new AIProviderError(result.message || "The OpenRouter API key is invalid.", "openrouter_invalid_key", debug);
+  if (result?.status === "billing-issue") return new AIProviderError(result.message || "OpenRouter could not run this model because of credits, billing, or free-model account limits.", "openrouter_billing_issue", debug);
+  if (result?.status === "model-unavailable") return new AIProviderError(result.message || "The configured OpenRouter model is unavailable or invalid.", "openrouter_model_unavailable", debug);
+  if (result?.status === "rate-limited") return new AIProviderError(result.message || "OpenRouter rate limit reached. Try again later.", "openrouter_rate_limited", debug);
+  if (result?.status === "provider-unavailable") return new AIProviderError(result.message || "The selected OpenRouter provider is unavailable. Try Auto Free Model.", "openrouter_provider_error", debug);
+  if (result?.status === "offline") return new AIProviderError(result.message || "OpenRouter is unreachable. Check your internet connection.", "openrouter_offline", debug);
+  if (result?.status === "provider-error") return new AIProviderError(result.message || "OpenRouter could not complete the request.", "openrouter_provider_error", debug);
+  return new AIProviderError(result?.message ?? "OpenRouter returned an unexpected response.", "unexpected_response", debug);
+}
+
 async function parseOrRepairStructured<T>(
   raw: string,
   schema: StructuredSchema,
   settings: UserSettings,
   validate: (value: unknown) => T | undefined,
 ): Promise<T> {
-  const parsed = parseStructured(raw, validate, schema, settings.language);
+  const parsed = parseStructured(raw, validate, schema, settings);
   if (parsed) return parsed;
 
   logInvalidAIResponse(raw, schema, "initial");
   const repaired = await repairStructuredResponse(raw, schema, settings);
-  const repairedParsed = parseStructured(repaired, validate, schema, settings.language);
+  const repairedParsed = parseStructured(repaired, validate, schema, settings);
   if (repairedParsed) return repairedParsed;
 
   logInvalidAIResponse(repaired, schema, "repair");
@@ -259,50 +331,76 @@ function parseStructured<T>(
   raw: string,
   validate: (value: unknown) => T | undefined,
   schema: StructuredSchema,
-  language: UserSettings["language"],
+  settings: UserSettings,
 ) {
   const candidates = extractJsonCandidates(raw);
+  if (!candidates.length) {
+    logSchemaValidationError(schema, "No JSON object found in assistant content.", raw, settings);
+  }
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as unknown;
       const valid = validate(parsed);
-      if (valid && isLanguageSafeStructured(valid, schema, language)) return valid;
-    } catch {
-      // Try the next candidate.
+      if (valid && isLanguageSafeStructured(valid, schema, settings.language)) return valid;
+      logSchemaValidationError(schema, valid ? "Structured response failed language safety validation." : "Structured response failed schema validation.", candidate, settings);
+    } catch (error) {
+      logSchemaValidationError(schema, error instanceof Error ? error.message : "Structured response JSON parse failed.", candidate, settings);
     }
   }
   return undefined;
 }
 
 async function repairStructuredResponse(raw: string, schema: StructuredSchema, settings: UserSettings) {
-  return requestOllamaChat(settings, [
+  return requestAIChat(settings, [
     { role: "system", content: buildRepairPrompt(schema, settings.language) },
     { role: "user", content: raw },
   ], { json: true });
 }
 
-function buildPlanPrompt(taskContext: Task[], language: UserSettings["language"]) {
-  return `${baseStructuredPrompt(taskContext, language)}
+function buildPlanPrompt(taskContext: Task[], availabilityBlocks: AvailabilityBlock[], language: UserSettings["language"]) {
+  return `${baseStructuredPrompt(taskContext, availabilityBlocks, language)}
 Mode: plan_day.
 Return one valid JSON object only:
 {
   "userMessage": "${copy(language).planUserMessage}",
   "plan": [
     { "time": "09:00", "title": "Focused work", "description": "Work on the most important task." }
-  ]
+  ],
+  "action": {
+    "type": "schedule_tasks",
+    "mode": "plan_day",
+    "changes": [
+      { "taskId": "existing-task-id", "scheduledAt": "2026-05-22T09:00", "durationMinutes": 45, "reason": "Fits before unavailable time." }
+    ]
+  }
 }
 
 Rules:
+- Schedule only eligible active tasks listed as eligible below.
+- Eligible means unscheduled, overdue, or missed. Never move completed tasks or future scheduled tasks.
+- Use each task duration when present. If missing, choose 30 minutes.
+- Avoid overlaps and unavailable blocks.
 - Use 3 to 8 plan blocks.
-- Prefer the user's existing scheduled times and durations.
-- If a time is unknown, omit time instead of inventing one.
+- If you cannot place a task safely, omit it from action.changes and explain briefly in the plan.
 - Keep titles and descriptions practical. No motivational filler.
-- time may be omitted when the user did not provide enough time context.
-- Do not create tasks or claim anything was saved.`;
+- Do not create tasks or claim anything was saved. The app applies changes only after confirmation.`;
+}
+
+function buildReplanPrompt(taskContext: Task[], availabilityBlocks: AvailabilityBlock[], language: UserSettings["language"]) {
+  return `${baseStructuredPrompt(taskContext, availabilityBlocks, language)}
+Mode: replan_tasks.
+Return the same schema as plan_day, but action.mode must be "replan_tasks".
+
+Rules:
+- Schedule only overdue or missed active tasks listed as eligible below.
+- Never move completed tasks or future scheduled tasks.
+- Avoid overlaps and unavailable blocks.
+- Preserve duration when available. If missing, choose 30 minutes.
+- Do not claim anything was saved. The app applies changes only after confirmation.`;
 }
 
 function buildCreateTasksPrompt(taskContext: Task[], language: UserSettings["language"]) {
-  return `${baseStructuredPrompt(taskContext, language)}
+  return `${baseStructuredPrompt(taskContext, [], language)}
 Mode: create_tasks.
 Extract tasks from the user's description. Return one valid JSON object only:
 {
@@ -315,6 +413,7 @@ Extract tasks from the user's description. Return one valid JSON object only:
         "description": "",
         "scheduledAt": "2026-05-16T18:30",
         "durationMinutes": 30,
+        "reminderMinutes": 10,
         "repeat": {
           "enabled": false,
           "type": "daily",
@@ -334,6 +433,7 @@ Rules:
 - action.type must be "create_tasks".
 - scheduledAt may be null, "YYYY-MM-DD", or "YYYY-MM-DDTHH:mm".
 - durationMinutes must be null or a positive integer when the user gives an estimate.
+- reminderMinutes must be null, 0, 5, 10, 30, or 60. Use it only when the user mentions a reminder.
 - repeat is optional. Use it only when the user explicitly mentions recurrence.
 - For weekdays use 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday.
 - For every weekday use weekdays [1,2,3,4,5]. For weekend use [0,6]. For every day except Sunday use type daily and excludedWeekdays [0].
@@ -365,9 +465,9 @@ Task description: ${task.description || "No description."}`;
 function buildRepairPrompt(schema: StructuredSchema, language: UserSettings["language"]) {
   const shape =
     schema === "create_tasks"
-      ? `{"userMessage":"${copy(language).createTasksUserMessage}","action":{"type":"create_tasks","tasks":[{"title":"Task title","description":"","scheduledAt":null,"durationMinutes":null,"repeat":{"enabled":false,"type":"daily","interval":1,"unit":"day","weekdays":[],"excludedWeekdays":[]},"projectName":"Personal","tags":[]}]}}`
-      : schema === "plan_day"
-        ? `{"userMessage":"${copy(language).planUserMessage}","plan":[{"time":"09:00","title":"Plan item","description":"What to do."}]}`
+      ? `{"userMessage":"${copy(language).createTasksUserMessage}","action":{"type":"create_tasks","tasks":[{"title":"Task title","description":"","scheduledAt":null,"durationMinutes":null,"reminderMinutes":null,"repeat":{"enabled":false,"type":"daily","interval":1,"unit":"day","weekdays":[],"excludedWeekdays":[]},"projectName":"Personal","tags":[]}]}}`
+      : schema === "plan_day" || schema === "replan_tasks"
+        ? `{"userMessage":"${copy(language).planUserMessage}","plan":[{"time":"09:00","title":"Plan item","description":"What to do."}],"action":{"type":"schedule_tasks","mode":"${schema}","changes":[{"taskId":"existing-task-id","scheduledAt":"2026-05-22T09:00","durationMinutes":30,"reason":"Fits available time."}]}}`
         : `{"userMessage":"${copy(language).subtasksUserMessage}","subtasks":["First step","Second step","Third step"]}`;
 
   return `Convert the user's content into valid JSON for Todo AI.
@@ -377,10 +477,13 @@ Required schema:
 ${shape}`;
 }
 
-function baseStructuredPrompt(taskContext: Task[], language: UserSettings["language"]) {
+function baseStructuredPrompt(taskContext: Task[], availabilityBlocks: AvailabilityBlock[], language: UserSettings["language"]) {
   const taskSummary = taskContext
     .slice(0, 20)
-    .map((task) => `- ${task.title} | status=${task.status} | scheduledAt=${task.scheduledAt ?? "none"} | duration=${task.durationMinutes ?? "none"} | repeat=${task.repeat.enabled ? "yes" : "no"}`)
+    .map((task) => `- id=${task.id} | ${task.title} | status=${task.status} | scheduledAt=${task.scheduledAt ?? "none"} | duration=${task.durationMinutes ?? "none"} | reminder=${task.reminderMinutes ?? "default"} | repeat=${task.repeat.enabled ? "yes" : "no"} | eligible=${isEligibleForPlan(task, "plan_day") ? "yes" : "no"} | replanEligible=${isEligibleForPlan(task, "replan_tasks") ? "yes" : "no"}`)
+    .join("\n");
+  const availabilitySummary = availabilityBlocks
+    .map((block) => `- ${block.label}: weekdays=${block.weekdays.join(",")} ${block.startTime}-${block.endTime}`)
     .join("\n");
 
   return `You are Todo AI, a practical desktop productivity assistant.
@@ -390,7 +493,9 @@ Follow the selected mode strictly. Keep wording concise and useful. Ask for clar
 Never return markdown fences. Never show raw JSON to the user. Never invent that app state changed.
 Only return structured data for the internal action schema requested by the system.
 Current tasks:
-${taskSummary || "No tasks yet."}`;
+${taskSummary || "No tasks yet."}
+Unavailable weekly blocks:
+${availabilitySummary || "No unavailable blocks."}`;
 }
 
 async function fetchWithProviderErrors(endpoint: string, init: RequestInit, settings: UserSettings) {
@@ -427,15 +532,17 @@ function validateCreateTasksAction(value: unknown): { userMessage: string; actio
   return tasks.length > 0 ? { userMessage, action: { type: "create_tasks", tasks } } : undefined;
 }
 
-function validatePlanDayResult(value: unknown): PlanDayResult | undefined {
+function validatePlanDayResult(value: unknown, taskContext: Task[], availabilityBlocks: AvailabilityBlock[], mode: "plan_day" | "replan_tasks" = "plan_day"): PlanDayResult | undefined {
   if (!isRecord(value)) return undefined;
   const planSource = Array.isArray(value.plan) ? value.plan : Array.isArray(value.blocks) ? value.blocks : Array.isArray(value.schedule) ? value.schedule : undefined;
   if (!planSource) return undefined;
   const plan = planSource.map(readPlanBlock).filter((block): block is PlanBlock => Boolean(block)).slice(0, 8);
   if (plan.length === 0) return undefined;
+  const action = readScheduleAction(value.action, taskContext, availabilityBlocks, mode);
   return {
     userMessage: readUserMessage(value) || "Here is a practical plan for your day.",
     plan,
+    action,
   };
 }
 
@@ -460,10 +567,74 @@ function readTaskDraft(value: unknown): AITaskDraft | undefined {
     description: typeof value.description === "string" ? value.description.trim() : "",
     scheduledAt: normalizeScheduledAt(scheduleValue),
     durationMinutes: readDurationMinutes(value.durationMinutes),
+    reminderMinutes: readReminderMinutes(value.reminderMinutes),
     repeat: isRecord(value.repeat) ? normalizeRepeat(value.repeat) : { ...defaultRepeat },
     projectName: typeof value.projectName === "string" && value.projectName.trim() ? value.projectName.trim() : undefined,
     tags: Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string").map((tag) => tag.trim()).filter(Boolean) : [],
   };
+}
+
+function readScheduleAction(value: unknown, tasks: Task[], availabilityBlocks: AvailabilityBlock[], mode: "plan_day" | "replan_tasks"): ScheduleTasksAction | undefined {
+  if (!isRecord(value) || value.type !== "schedule_tasks" || !Array.isArray(value.changes)) return undefined;
+  const changes = value.changes
+    .map((change) => readScheduleChange(change, tasks, mode))
+    .filter((change): change is ScheduleChangeDraft => Boolean(change));
+  const validated = removeInvalidScheduleChanges(changes, tasks, availabilityBlocks);
+  return validated.length ? { type: "schedule_tasks", mode, changes: validated } : undefined;
+}
+
+function readScheduleChange(value: unknown, tasks: Task[], mode: "plan_day" | "replan_tasks"): ScheduleChangeDraft | undefined {
+  if (!isRecord(value) || typeof value.taskId !== "string") return undefined;
+  const task = tasks.find((item) => item.id === value.taskId);
+  if (!task || !isEligibleForPlan(task, mode)) return undefined;
+  const scheduledAt = normalizeScheduledAt(typeof value.scheduledAt === "string" ? value.scheduledAt : null);
+  if (!scheduledAt || !getScheduleTime(scheduledAt)) return undefined;
+  return {
+    taskId: task.id,
+    scheduledAt,
+    durationMinutes: readDurationMinutes(value.durationMinutes) ?? task.durationMinutes ?? 30,
+    reason: typeof value.reason === "string" ? value.reason.trim() : "",
+  };
+}
+
+function removeInvalidScheduleChanges(changes: ScheduleChangeDraft[], tasks: Task[], availabilityBlocks: AvailabilityBlock[]) {
+  const accepted: ScheduleChangeDraft[] = [];
+  for (const change of changes) {
+    const task = tasks.find((item) => item.id === change.taskId);
+    if (!task || task.status === "completed") continue;
+    const duration = change.durationMinutes ?? task.durationMinutes ?? 30;
+    if (duration <= 0) continue;
+    const candidate = { ...change, durationMinutes: duration };
+    if (isUnavailable(candidate, availabilityBlocks)) continue;
+    if (accepted.some((existing) => rangesOverlap(existing.scheduledAt, existing.durationMinutes ?? 30, candidate.scheduledAt, duration))) continue;
+    if (tasks.some((existing) => existing.id !== task.id && existing.status === "active" && getScheduleTime(existing.scheduledAt) && rangesOverlap(existing.scheduledAt, existing.durationMinutes ?? 30, candidate.scheduledAt, duration))) continue;
+    accepted.push(candidate);
+  }
+  return accepted;
+}
+
+function isUnavailable(change: ScheduleChangeDraft, availabilityBlocks: AvailabilityBlock[]) {
+  const start = new Date(`${getScheduleDate(change.scheduledAt)}T${getScheduleTime(change.scheduledAt)}:00`);
+  const weekday = start.getDay();
+  const startMinutes = toMinutes(getScheduleTime(change.scheduledAt));
+  const endMinutes = startMinutes + (change.durationMinutes ?? 30);
+  return availabilityBlocks.some((block) => block.weekdays.includes(weekday) && rangesOverlapMinutes(startMinutes, endMinutes, toMinutes(block.startTime), toMinutes(block.endTime)));
+}
+
+function rangesOverlap(aStart: string | null | undefined, aDuration: number, bStart: string, bDuration: number) {
+  if (!aStart || getScheduleDate(aStart) !== getScheduleDate(bStart) || !getScheduleTime(aStart)) return false;
+  const a = toMinutes(getScheduleTime(aStart));
+  const b = toMinutes(getScheduleTime(bStart));
+  return rangesOverlapMinutes(a, a + aDuration, b, b + bDuration);
+}
+
+function rangesOverlapMinutes(aStart: number, aEnd: number, bStart: number, bEnd: number) {
+  return aStart < bEnd && bStart < aEnd;
+}
+
+function toMinutes(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return (hours || 0) * 60 + (minutes || 0);
 }
 
 function readPlanBlock(value: unknown): PlanBlock | undefined {
@@ -506,7 +677,9 @@ function renderPlanMessage(plan: PlanDayResult, language: UserSettings["language
 
 function renderCreateTasksMessage(count: number, language: UserSettings["language"]) {
   if (language === "ru") {
-    return count === 1 ? "Я нашел 1 задачу. Проверьте ее перед созданием." : `Я нашел ${count} задач. Проверьте их перед созданием.`;
+    return count === 1
+      ? "\u042f \u043d\u0430\u0448\u0435\u043b 1 \u0437\u0430\u0434\u0430\u0447\u0443. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0435\u0435 \u043f\u0435\u0440\u0435\u0434 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0435\u043c."
+      : `\u042f \u043d\u0430\u0448\u0435\u043b ${count} \u0437\u0430\u0434\u0430\u0447. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0438\u0445 \u043f\u0435\u0440\u0435\u0434 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0435\u043c.`;
   }
   return count === 1 ? "I found 1 task. Review it before creating it." : `I found ${count} tasks. Review them before creating them.`;
 }
@@ -522,6 +695,24 @@ function sanitizeAssistantText(value: string, fallback: string) {
 function readDurationMinutes(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
   return Math.floor(value);
+}
+
+function readReminderMinutes(value: unknown): ReminderOffsetMinutes | null {
+  return value === 0 || value === 5 || value === 10 || value === 30 || value === 60 ? value : null;
+}
+
+function isEligibleForPlan(task: Task, mode: "plan_day" | "replan_tasks") {
+  if (task.status === "completed") return false;
+  const scheduledDate = getScheduleDate(task.scheduledAt);
+  const hasTime = Boolean(getScheduleTime(task.scheduledAt));
+  const today = getTodayISO();
+  const missedToday = scheduledDate === today && hasTime && toMinutes(getScheduleTime(task.scheduledAt)) < getCurrentMinutes();
+  if (mode === "replan_tasks") return Boolean((scheduledDate && scheduledDate < today) || missedToday);
+  return !scheduledDate || !hasTime || scheduledDate < today || missedToday;
+}
+
+function getCurrentMinutes(date = new Date()) {
+  return date.getHours() * 60 + date.getMinutes();
 }
 
 function readOllamaMessage(payload: unknown) {
@@ -669,17 +860,18 @@ function languageInstruction(language: UserSettings["language"]) {
 }
 
 function copy(language: UserSettings["language"]) {
-  return language === "ru"
-    ? {
-      planUserMessage: "Вот практичный план на день.",
-      createTasksUserMessage: "Я нашел задачи. Проверьте их перед созданием.",
-      subtasksUserMessage: "Вот короткий список подзадач.",
-    }
-    : {
-      planUserMessage: "Here is a practical plan for your day.",
-      createTasksUserMessage: "I found tasks. Review them before creating them.",
-      subtasksUserMessage: "Here is a smaller checklist.",
+  if (language === "ru") {
+    return {
+      planUserMessage: "\u0412\u043e\u0442 \u043f\u0440\u0430\u043a\u0442\u0438\u0447\u043d\u044b\u0439 \u043f\u043b\u0430\u043d \u043d\u0430 \u0434\u0435\u043d\u044c.",
+      createTasksUserMessage: "\u042f \u043d\u0430\u0448\u0435\u043b \u0437\u0430\u0434\u0430\u0447\u0438. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0438\u0445 \u043f\u0435\u0440\u0435\u0434 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0435\u043c.",
+      subtasksUserMessage: "\u0412\u043e\u0442 \u043a\u043e\u0440\u043e\u0442\u043a\u0438\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u043f\u043e\u0434\u0437\u0430\u0434\u0430\u0447.",
     };
+  }
+  return {
+    planUserMessage: "Here is a practical plan for your day.",
+    createTasksUserMessage: "I found tasks. Review them before creating them.",
+    subtasksUserMessage: "Here is a smaller checklist.",
+  };
 }
 
 function logAIDebug(message: string, data: Record<string, string | number | boolean | undefined>) {
@@ -701,5 +893,17 @@ function logAIError(error: AIProviderError) {
 function logInvalidAIResponse(rawResponse: string, schema: StructuredSchema, phase: "initial" | "repair") {
   if (import.meta.env.DEV) {
     console.error("[Todo AI] Invalid AI response", { schema, phase, rawResponse });
+  }
+}
+
+function logSchemaValidationError(schema: StructuredSchema, validationError: string, rawAssistantContent: string, settings: UserSettings) {
+  if (import.meta.env.DEV) {
+    console.error("[Todo AI] Schema validation error", {
+      provider: settings.aiProvider,
+      model: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
+      schema,
+      validationError,
+      rawAssistantContent,
+    });
   }
 }

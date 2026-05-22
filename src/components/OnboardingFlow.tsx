@@ -1,6 +1,6 @@
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import { Bell, Check, Cpu, Download, Languages, Loader2, Moon, Plus, Sparkles, Sun, Monitor } from "lucide-react";
+import { Bell, Check, Cpu, Download, KeyRound, Languages, Loader2, Moon, Plus, Sparkles, Sun, Monitor } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { Language, Project, ReminderOffsetMinutes, TaskDraft, ThemeMode, UserSettings } from "../types";
@@ -17,15 +17,32 @@ interface OnboardingFlowProps {
 }
 
 const onboardingModels = ["llama3.1:latest", "llama3.2:latest", "mistral:latest"];
+const openRouterModelOptions = [
+  {
+    id: "openrouter/free",
+    labelKey: "settings.openRouterAutoFreeModel",
+    descriptionKey: "settings.openRouterAutoFreeModelDescription",
+    recommended: true,
+  },
+  {
+    id: "deepseek/deepseek-v4-flash:free",
+    labelKey: "settings.openRouterDeepseekModel",
+    descriptionKey: "settings.openRouterDeepseekModelDescription",
+    recommended: false,
+  },
+] as const;
 
 export function OnboardingFlow({ projects, settings, updateSettings, onAddTask, onComplete }: OnboardingFlowProps) {
   const { language, setLanguage, t } = useI18n();
   const rootRef = useRef<HTMLDivElement>(null);
+  const openRouterKeyRef = useRef<HTMLInputElement>(null);
   const [stepIndex, setStepIndex] = useState(0);
   const [ollamaStatus, setOllamaStatus] = useState<OllamaSetupStatus | null>(null);
   const [isCheckingOllama, setIsCheckingOllama] = useState(false);
   const [installingModel, setInstallingModel] = useState("");
   const [modelInstallStatus, setModelInstallStatus] = useState("");
+  const [openRouterStatus, setOpenRouterStatus] = useState("");
+  const [isTestingOpenRouter, setIsTestingOpenRouter] = useState(false);
   const [firstTaskTitle, setFirstTaskTitle] = useState("");
 
   const installedModels = ollamaStatus?.models ?? [];
@@ -70,8 +87,8 @@ export function OnboardingFlow({ projects, settings, updateSettings, onAddTask, 
   }, { dependencies: [stepIndex], scope: rootRef, revertOnUpdate: true });
 
   useEffect(() => {
-    if (stepIndex === 3) void refreshOllamaStatus();
-  }, [stepIndex]);
+    if (stepIndex === 3 && settings.aiProvider === "ollama") void refreshOllamaStatus();
+  }, [settings.aiProvider, stepIndex]);
 
   function handleLanguageChange(nextLanguage: Language) {
     setLanguage(nextLanguage);
@@ -103,6 +120,29 @@ export function OnboardingFlow({ projects, settings, updateSettings, onAddTask, 
     await refreshOllamaStatus();
   }
 
+  async function saveOpenRouterKey() {
+    const input = openRouterKeyRef.current;
+    const value = input?.value.trim() ?? "";
+    if (input) input.value = "";
+    const saved = await window.todoAI?.setOpenRouterApiKey(value);
+    if (!saved?.ok) {
+      setOpenRouterStatus(t("settings.openRouterInvalidKey"));
+      return;
+    }
+    setOpenRouterStatus(t("settings.openRouterKeySaved"));
+  }
+
+  async function testOpenRouterConnection() {
+    setIsTestingOpenRouter(true);
+    setOpenRouterStatus(t("settings.testingConnection"));
+    try {
+      const tested = await window.todoAI?.testOpenRouterConnection(settings.cloudModel);
+      setOpenRouterStatus(tested?.ok ? t("settings.connected") : tested?.message ?? t("settings.openRouterOffline"));
+    } finally {
+      setIsTestingOpenRouter(false);
+    }
+  }
+
   function finishOnboarding(skipTask = false) {
     const title = firstTaskTitle.trim();
     if (!skipTask && title) {
@@ -113,6 +153,7 @@ export function OnboardingFlow({ projects, settings, updateSettings, onAddTask, 
         scheduledAt: null,
         projectId: projects[0]?.id ?? "uncategorized",
         durationMinutes: null,
+        reminderMinutes: null,
         repeat: { ...defaultRepeat },
         nextRepeatAt: null,
         tags: [],
@@ -184,6 +225,48 @@ export function OnboardingFlow({ projects, settings, updateSettings, onAddTask, 
               <span className="onboarding-panel__icon"><Cpu size={22} /></span>
               <h2 id="onboarding-title">{t("onboarding.aiSetup")}</h2>
               <p>{t("onboarding.aiDescription")}</p>
+              <div className="segmented-control">
+                <button className={settings.aiProvider === "ollama" ? "segmented-control__item segmented-control__item--active" : "segmented-control__item"} onClick={() => updateSettings({ aiProvider: "ollama" })} type="button">
+                  <Cpu size={15} />
+                  {t("settings.localAI")}
+                </button>
+                <button className={settings.aiProvider === "openrouter" ? "segmented-control__item segmented-control__item--active" : "segmented-control__item"} onClick={() => updateSettings({ aiProvider: "openrouter" })} type="button">
+                  <KeyRound size={15} />
+                  {t("settings.cloudAI")}
+                </button>
+              </div>
+              {settings.aiProvider === "openrouter" ? (
+                <>
+                  <label className="onboarding-field">
+                    <span>{t("settings.openRouterApiKey")}</span>
+                    <input ref={openRouterKeyRef} type="password" placeholder="sk-or-v1-..." autoComplete="off" />
+                  </label>
+                  <label className="onboarding-field">
+                    <span>{t("settings.cloudModel")}</span>
+                    <select value={settings.cloudModel} onChange={(event) => updateSettings({ cloudModel: event.target.value })}>
+                      {openRouterModelOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {t(option.labelKey)}{option.recommended ? ` (${t("settings.recommended")})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="settings-helper-inline">
+                    {t(openRouterModelOptions.find((option) => option.id === settings.cloudModel)?.descriptionKey ?? "settings.openRouterAutoFreeModelDescription")}
+                  </p>
+                  <p className="settings-helper-inline">{t("settings.openRouterFreeModelNote")}</p>
+                  <button className="button button--primary" onClick={() => void saveOpenRouterKey()} type="button">
+                    <KeyRound size={16} />
+                    {t("settings.saveApiKey")}
+                  </button>
+                  <button className="button button--secondary" disabled={isTestingOpenRouter} onClick={() => void testOpenRouterConnection()} type="button">
+                    {isTestingOpenRouter ? <Loader2 size={16} className="spin-icon" /> : <Check size={16} />}
+                    {t("settings.testConnection")}
+                  </button>
+                  {openRouterStatus ? <p className="settings-helper-inline">{openRouterStatus}</p> : null}
+                </>
+              ) : (
+                <>
               <div className="setup-status-row">
                 <span className={`status-pill status-pill--${ollamaStatus?.status === "connected" ? "connected" : "model-missing"}`}>
                   {isCheckingOllama ? t("settings.checkingOllama") : formatOllamaStatus(ollamaStatus, t)}
@@ -213,6 +296,8 @@ export function OnboardingFlow({ projects, settings, updateSettings, onAddTask, 
                 </div>
               )}
               {modelInstallStatus ? <p className="settings-helper-inline">{modelInstallStatus}</p> : null}
+                </>
+              )}
             </section>
           ) : null}
 

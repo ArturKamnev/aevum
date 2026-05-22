@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Bell,
+  CalendarClock,
   Check,
   CheckCircle2,
   Cpu,
@@ -8,6 +9,7 @@ import {
   Download,
   ExternalLink,
   Info,
+  KeyRound,
   Languages,
   Loader2,
   Monitor,
@@ -19,9 +21,9 @@ import {
   Sun,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
-import type { Language, ReminderOffsetMinutes, ThemeMode, UserSettings } from "../types";
+import type { AvailabilityBlock, AIProvider, Language, ReminderOffsetMinutes, ThemeMode, UserSettings } from "../types";
 
 interface SettingsPageProps {
   clearAiHistory: () => void;
@@ -74,6 +76,21 @@ const recommendedModelGroups: Array<{
   },
 ] as const;
 
+const openRouterModelOptions = [
+  {
+    id: "openrouter/free",
+    labelKey: "settings.openRouterAutoFreeModel",
+    descriptionKey: "settings.openRouterAutoFreeModelDescription",
+    recommended: true,
+  },
+  {
+    id: "deepseek/deepseek-v4-flash:free",
+    labelKey: "settings.openRouterDeepseekModel",
+    descriptionKey: "settings.openRouterDeepseekModelDescription",
+    recommended: false,
+  },
+] as const;
+
 type TranslationModelDescriptionKey =
   | "settings.modelDescription.llama31"
   | "settings.modelDescription.llama32"
@@ -85,8 +102,11 @@ type TranslationModelDescriptionKey =
   | "settings.modelDescription.glm"
   | "settings.modelDescription.neutron";
 
+const weekdayNumbers = [1, 2, 3, 4, 5, 6, 0];
+
 export function SettingsPage({ clearAiHistory, settings, updateSettings }: SettingsPageProps) {
   const { language, languageNames, setLanguage, t } = useI18n();
+  const openRouterKeyRef = useRef<HTMLInputElement>(null);
   const [appVersion, setAppVersion] = useState("");
   const [ollamaStatus, setOllamaStatus] = useState<SetupStatus | null>(null);
   const [isRefreshingModels, setIsRefreshingModels] = useState(false);
@@ -100,6 +120,10 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
   const [deletingModel, setDeletingModel] = useState("");
   const [modelActionMessage, setModelActionMessage] = useState("");
+  const [openRouterStatus, setOpenRouterStatus] = useState<"idle" | "checking" | "connected" | "missing-key" | "invalid-key" | "billing-issue" | "model-unavailable" | "rate-limited" | "provider-unavailable" | "offline" | "error">("idle");
+  const [openRouterStatusMessage, setOpenRouterStatusMessage] = useState("");
+  const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
+  const [scheduleDraft, setScheduleDraft] = useState({ label: "", weekdays: [1, 2, 3, 4, 5], startTime: "09:00", endTime: "17:00" });
   const [notificationStatus, setNotificationStatus] = useState("");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ status: "idle" });
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
@@ -112,8 +136,8 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const missingSelectedModel = Boolean(ollamaStatus && ollamaStatus.status === "model-missing");
 
   useEffect(() => {
-    if (settings.aiProvider !== "ollama") updateSettings({ aiProvider: "ollama", apiKey: "" });
-  }, [settings.aiProvider, updateSettings]);
+    void refreshOpenRouterKeyStatus();
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -220,6 +244,69 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
       setDeletingModel("");
       setConfirmAction(null);
     }
+  }
+
+  async function refreshOpenRouterKeyStatus() {
+    const result = await window.todoAI?.hasOpenRouterApiKey();
+    setHasOpenRouterKey(Boolean(result?.hasKey));
+    if (result?.hasKey && openRouterStatus === "missing-key") setOpenRouterStatus("idle");
+  }
+
+  async function handleSaveOpenRouterKey() {
+    const input = openRouterKeyRef.current;
+    const value = input?.value.trim() ?? "";
+    if (input) input.value = "";
+    const result = await window.todoAI?.setOpenRouterApiKey(value);
+    if (!result?.ok) {
+      setOpenRouterStatus("invalid-key");
+      setOpenRouterStatusMessage(result?.message ?? t("settings.openRouterInvalidKey"));
+      return;
+    }
+    setHasOpenRouterKey(true);
+    setOpenRouterStatus("connected");
+    setOpenRouterStatusMessage("");
+  }
+
+  async function handleTestOpenRouter() {
+    setOpenRouterStatus("checking");
+    const result = await window.todoAI?.testOpenRouterConnection(settings.cloudModel);
+    setOpenRouterStatus(result?.ok ? "connected" : mapOpenRouterStatus(result?.status));
+    setOpenRouterStatusMessage(result?.ok ? "" : result?.message ?? "");
+    await refreshOpenRouterKeyStatus();
+  }
+
+  async function handleDeleteOpenRouterKey() {
+    await window.todoAI?.deleteOpenRouterApiKey();
+    setHasOpenRouterKey(false);
+    setOpenRouterStatus("missing-key");
+    setOpenRouterStatusMessage("");
+  }
+
+  function addAvailabilityBlock() {
+    const label = scheduleDraft.label.trim() || t("settings.unavailable");
+    if (!scheduleDraft.weekdays.length || scheduleDraft.startTime >= scheduleDraft.endTime) return;
+    const block: AvailabilityBlock = {
+      id: `availability-${Date.now()}`,
+      label,
+      weekdays: scheduleDraft.weekdays,
+      startTime: scheduleDraft.startTime,
+      endTime: scheduleDraft.endTime,
+    };
+    updateSettings({ availabilityBlocks: [...settings.availabilityBlocks, block] });
+    setScheduleDraft({ label: "", weekdays: [1, 2, 3, 4, 5], startTime: "09:00", endTime: "17:00" });
+  }
+
+  function deleteAvailabilityBlock(id: string) {
+    updateSettings({ availabilityBlocks: settings.availabilityBlocks.filter((block) => block.id !== id) });
+  }
+
+  function toggleScheduleWeekday(day: number) {
+    setScheduleDraft((current) => ({
+      ...current,
+      weekdays: current.weekdays.includes(day)
+        ? current.weekdays.filter((item) => item !== day)
+        : [...current.weekdays, day].sort((a, b) => a - b),
+    }));
   }
 
   async function handleTestNotification() {
@@ -333,6 +420,72 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
       </SettingsSection>
 
       <SettingsSection icon={Cpu} title={t("settings.aiModels")} description={t("settings.aiSetupDescription")}>
+        <div className="segmented-control">
+          {[
+            { value: "ollama", label: t("settings.localAI"), icon: Cpu },
+            { value: "openrouter", label: t("settings.cloudAI"), icon: KeyRound },
+          ].map((option) => {
+            const Icon = option.icon;
+            return (
+              <button
+                className={settings.aiProvider === option.value ? "segmented-control__item segmented-control__item--active" : "segmented-control__item"}
+                key={option.value}
+                onClick={() => updateSettings({ aiProvider: option.value as AIProvider })}
+                type="button"
+              >
+                <Icon size={15} />
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {settings.aiProvider === "openrouter" ? (
+          <div className="advanced-settings">
+            <div className="setup-status-row">
+              <span className={`status-pill status-pill--${openRouterStatus === "connected" ? "connected" : "model-missing"}`}>
+                {formatOpenRouterStatus(openRouterStatus, hasOpenRouterKey, t)}
+              </span>
+              <strong className="readonly-value">{settings.cloudModel}</strong>
+            </div>
+            <label className="field-row">
+              <span>{t("settings.cloudModel")}</span>
+              <select value={settings.cloudModel} onChange={(event) => updateSettings({ cloudModel: event.target.value })}>
+                {openRouterModelOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {t(option.labelKey)}{option.recommended ? ` (${t("settings.recommended")})` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="settings-helper-inline">
+              {t(openRouterModelOptions.find((option) => option.id === settings.cloudModel)?.descriptionKey ?? "settings.openRouterAutoFreeModelDescription")}
+            </p>
+            <p className="settings-helper-inline">{t("settings.openRouterFreeModelNote")}</p>
+            <label className="field-row">
+              <span>{t("settings.openRouterApiKey")}</span>
+              <input ref={openRouterKeyRef} type="password" placeholder="sk-or-v1-..." autoComplete="off" />
+            </label>
+            <div className="ai-settings-actions">
+              <button className="button button--primary" onClick={() => void handleSaveOpenRouterKey()} type="button">
+                <KeyRound size={16} />
+                {t("settings.saveApiKey")}
+              </button>
+              <button className="button button--secondary" disabled={!hasOpenRouterKey || openRouterStatus === "checking"} onClick={() => void handleTestOpenRouter()} type="button">
+                {openRouterStatus === "checking" ? <Loader2 size={16} className="spin-icon" /> : <Check size={16} />}
+                {t("settings.testConnection")}
+              </button>
+              <button className="button button--danger" disabled={!hasOpenRouterKey} onClick={() => void handleDeleteOpenRouterKey()} type="button">
+                <Trash2 size={16} />
+                {t("settings.removeApiKey")}
+              </button>
+            </div>
+            {openRouterStatusMessage ? <p className="settings-helper-inline">{openRouterStatusMessage}</p> : null}
+          </div>
+        ) : null}
+
+        {settings.aiProvider === "ollama" ? (
+          <>
         <div className="setup-status-row">
           <span className={`status-pill status-pill--${aiStatusTone}`}>{aiStatusText}</span>
           <button className="button button--secondary" disabled={isRefreshingModels} onClick={() => void refreshOllamaStatus()} type="button">
@@ -552,6 +705,42 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             </button>
           </div>
         ) : null}
+          </>
+        ) : null}
+      </SettingsSection>
+
+      <SettingsSection icon={CalendarClock} title={t("settings.schedule")} description={t("settings.scheduleDescription")}>
+        <div className="availability-editor">
+          <input value={scheduleDraft.label} onChange={(event) => setScheduleDraft((current) => ({ ...current, label: event.target.value }))} placeholder={t("settings.scheduleLabelPlaceholder")} />
+          <div className="weekday-picker">
+            {weekdayNumbers.map((day) => (
+              <button className={`weekday-chip ${scheduleDraft.weekdays.includes(day) ? "weekday-chip--active" : ""}`} key={day} onClick={() => toggleScheduleWeekday(day)} type="button">
+                {getWeekdayShort(day, t)}
+              </button>
+            ))}
+          </div>
+          <div className="task-modal__grid">
+            <input value={scheduleDraft.startTime} onChange={(event) => setScheduleDraft((current) => ({ ...current, startTime: event.target.value }))} type="time" aria-label={t("settings.scheduleStart")} />
+            <input value={scheduleDraft.endTime} onChange={(event) => setScheduleDraft((current) => ({ ...current, endTime: event.target.value }))} type="time" aria-label={t("settings.scheduleEnd")} />
+          </div>
+          <button className="button button--primary" disabled={!scheduleDraft.weekdays.length || scheduleDraft.startTime >= scheduleDraft.endTime} onClick={addAvailabilityBlock} type="button">
+            {t("settings.addUnavailableBlock")}
+          </button>
+        </div>
+        <div className="installed-model-list">
+          {settings.availabilityBlocks.length ? settings.availabilityBlocks.map((block) => (
+            <article className="installed-model" key={block.id}>
+              <div>
+                <strong>{block.label}</strong>
+                <span>{block.weekdays.map((day) => getWeekdayShort(day, t)).join(", ")} · {block.startTime}-{block.endTime}</span>
+              </div>
+              <button className="button button--danger" onClick={() => deleteAvailabilityBlock(block.id)} type="button">
+                <Trash2 size={16} />
+                {t("settings.delete")}
+              </button>
+            </article>
+          )) : <p className="settings-helper-inline">{t("settings.noUnavailableBlocks")}</p>}
+        </div>
       </SettingsSection>
 
       <SettingsSection icon={Info} title={t("settings.aboutTitle")} description={t("settings.aboutDescription")}>
@@ -793,4 +982,41 @@ function getConfirmDescription(
   if (action.type === "cache") return t("settings.confirmClearCacheDescription");
   if (action.type === "history") return t("settings.confirmClearHistoryDescription");
   return `${t("settings.confirmDeleteModelDescription")} ${action.modelName}`;
+}
+
+function mapOpenRouterStatus(status: OpenRouterResult["status"] | undefined) {
+  if (status === "invalid-key") return "invalid-key";
+  if (status === "billing-issue") return "billing-issue";
+  if (status === "model-unavailable") return "model-unavailable";
+  if (status === "rate-limited") return "rate-limited";
+  if (status === "provider-unavailable") return "provider-unavailable";
+  if (status === "offline") return "offline";
+  if (status === "missing-key") return "missing-key";
+  return "error";
+}
+
+function formatOpenRouterStatus(status: "idle" | "checking" | "connected" | "missing-key" | "invalid-key" | "billing-issue" | "model-unavailable" | "rate-limited" | "provider-unavailable" | "offline" | "error", hasKey: boolean, t: ReturnType<typeof useI18n>["t"]) {
+  if (status === "checking") return t("settings.testingConnection");
+  if (status === "connected") return t("settings.connected");
+  if (status === "invalid-key") return t("settings.openRouterInvalidKey");
+  if (status === "billing-issue") return t("settings.openRouterBillingIssue");
+  if (status === "model-unavailable") return t("settings.openRouterModelUnavailable");
+  if (status === "rate-limited") return t("settings.openRouterRateLimited");
+  if (status === "provider-unavailable") return t("settings.openRouterProviderUnavailable");
+  if (status === "offline") return t("settings.openRouterOffline");
+  if (status === "missing-key" || !hasKey) return t("settings.openRouterMissingKey");
+  return t("settings.notChecked");
+}
+
+function getWeekdayShort(day: number, t: ReturnType<typeof useI18n>["t"]) {
+  const keys = [
+    "weekday.short.sunday",
+    "weekday.short.monday",
+    "weekday.short.tuesday",
+    "weekday.short.wednesday",
+    "weekday.short.thursday",
+    "weekday.short.friday",
+    "weekday.short.saturday",
+  ] as const;
+  return t(keys[day]);
 }

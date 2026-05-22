@@ -2,11 +2,17 @@ import { app, BrowserWindow, ipcMain, nativeTheme, Notification, session, shell 
 import { autoUpdater } from "electron-updater";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
+import keytar from "keytar";
 import os from "node:os";
 import path from "node:path";
 
 const isDev = !app.isPackaged;
 const ollamaDownloadUrl = "https://ollama.com/download";
+const openRouterService = "Todo AI";
+const openRouterAccount = "openrouter";
+const defaultOpenRouterModel = "openrouter/free";
+const openRouterModels = new Set(["openrouter/free", "deepseek/deepseek-v4-flash:free"]);
+const openRouterEndpoint = "https://openrouter.ai/api/v1/chat/completions";
 const recommendedModels = new Set([
   "llama3.1:latest",
   "llama3.2:latest",
@@ -30,6 +36,19 @@ const recommendedModels = new Set([
 
 type UpdateStatus = "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error" | "unavailable";
 type OllamaStatus = "connected" | "model-missing" | "not-running" | "not-installed";
+type OpenRouterRole = "system" | "user" | "assistant";
+type OpenRouterStatus =
+  | "connected"
+  | "missing-key"
+  | "invalid-key"
+  | "billing-issue"
+  | "model-unavailable"
+  | "rate-limited"
+  | "provider-unavailable"
+  | "offline"
+  | "provider-error"
+  | "unexpected-response"
+  | "invalid-request";
 
 interface OllamaModel {
   name: string;
@@ -49,12 +68,18 @@ interface PullProgressPayload {
   type?: string;
 }
 
+interface OpenRouterChatRequest {
+  messages: Array<{ role: OpenRouterRole; content: string }>;
+  model: string;
+}
+
 interface NotificationTaskPayload {
   id: string;
   title: string;
   description?: string;
   status: "active" | "completed";
   scheduledAt: string | null;
+  reminderMinutes?: ReminderOffsetMinutes | null;
 }
 
 type ReminderOffsetMinutes = 0 | 5 | 10 | 30 | 60;
@@ -133,6 +158,11 @@ app.whenReady().then(() => {
     activePull = null;
     return { ok: true };
   });
+  ipcMain.handle("openrouter:set-api-key", async (_event, apiKey?: unknown) => setOpenRouterApiKey(apiKey));
+  ipcMain.handle("openrouter:has-api-key", async () => hasOpenRouterApiKey());
+  ipcMain.handle("openrouter:delete-api-key", async () => deleteOpenRouterApiKey());
+  ipcMain.handle("openrouter:test-connection", async (_event, selectedModel?: unknown) => testOpenRouterConnection(selectedModel));
+  ipcMain.handle("ai:chat-openrouter", async (_event, payload?: unknown) => chatOpenRouter(payload));
   ipcMain.handle("notifications:schedule", (_event, tasks?: unknown, settings?: unknown) => {
     return scheduleTaskNotifications(tasks, settings);
   });
@@ -215,10 +245,11 @@ function scheduleTaskNotifications(tasks: unknown, settings: unknown) {
     const scheduledAt = readScheduledDate(task.scheduledAt);
     if (!scheduledAt) continue;
 
-    const notifyAt = scheduledAt.getTime() - parsedSettings.defaultReminderMinutes * 60_000;
+    const reminderMinutes = task.reminderMinutes ?? parsedSettings.defaultReminderMinutes;
+    const notifyAt = scheduledAt.getTime() - reminderMinutes * 60_000;
     if (notifyAt <= now) continue;
 
-    const key = `${task.id}:${task.scheduledAt}:${parsedSettings.defaultReminderMinutes}`;
+    const key = `${task.id}:${task.scheduledAt}:${reminderMinutes}`;
     if (firedNotifications.has(key)) continue;
 
     const timer = setTimeout(() => {
@@ -226,9 +257,9 @@ function scheduleTaskNotifications(tasks: unknown, settings: unknown) {
       notificationTimers.delete(key);
       void showTaskNotification({
         title: task.title,
-        body: parsedSettings.defaultReminderMinutes === 0
+        body: reminderMinutes === 0
           ? "Scheduled now"
-          : `${parsedSettings.defaultReminderMinutes} minutes before scheduled time`,
+          : `${reminderMinutes} minutes before scheduled time`,
       });
     }, Math.min(notifyAt - now, 2_147_483_647));
 
@@ -266,11 +297,16 @@ function readNotificationTask(value: unknown): NotificationTaskPayload | null {
     description: typeof value.description === "string" ? value.description.slice(0, 240) : "",
     status: value.status === "completed" ? "completed" : "active",
     scheduledAt: typeof value.scheduledAt === "string" ? value.scheduledAt : null,
+    reminderMinutes: readReminderOffsetOrNull(value.reminderMinutes),
   };
 }
 
 function readReminderOffset(value: unknown): ReminderOffsetMinutes {
   return value === 5 || value === 10 || value === 30 || value === 60 ? value : 0;
+}
+
+function readReminderOffsetOrNull(value: unknown): ReminderOffsetMinutes | null {
+  return value === 0 || value === 5 || value === 10 || value === 30 || value === 60 ? value : null;
 }
 
 function readScheduledDate(value: string | null) {
@@ -431,6 +467,205 @@ async function deleteOllamaModel(modelName: string) {
       resolve({ ok: true, modelName });
     });
   });
+}
+
+async function setOpenRouterApiKey(value: unknown) {
+  if (typeof value !== "string") return { ok: false, status: "invalid" };
+  const apiKey = value.trim();
+  if (!/^sk-or-v1-[A-Za-z0-9_-]{20,}$/.test(apiKey)) return { ok: false, status: "invalid" };
+  await keytar.setPassword(openRouterService, openRouterAccount, apiKey);
+  return { ok: true };
+}
+
+async function hasOpenRouterApiKey() {
+  const apiKey = await keytar.getPassword(openRouterService, openRouterAccount);
+  return { ok: true, hasKey: Boolean(apiKey) };
+}
+
+async function deleteOpenRouterApiKey() {
+  await keytar.deletePassword(openRouterService, openRouterAccount);
+  return { ok: true };
+}
+
+async function testOpenRouterConnection(selectedModel?: unknown) {
+  const result = await chatOpenRouter({
+    model: readOpenRouterModel(selectedModel),
+    messages: [
+      { role: "system", content: "Reply with exactly: OK" },
+      { role: "user", content: "test" },
+    ],
+  }, true);
+  if (!result.ok) return result;
+  const content = "content" in result ? result.content : "";
+  if (typeof content !== "string" || !content.trim()) {
+    return { ok: false, status: "unexpected-response", message: "OpenRouter returned an empty response.", model: readOpenRouterModel(selectedModel) };
+  }
+  return { ok: true, status: "connected", message: "Connected", model: readOpenRouterModel(selectedModel) };
+}
+
+async function chatOpenRouter(payload: unknown, isTest = false) {
+  const apiKey = await keytar.getPassword(openRouterService, openRouterAccount);
+  if (!apiKey) return { ok: false, status: "missing-key", message: "OpenRouter API key is missing." };
+  const request = readOpenRouterRequest(payload);
+  if (!request) return { ok: false, status: "invalid-request", message: "Invalid AI request." };
+
+  try {
+    return await sendOpenRouterChat(apiKey, request, isTest);
+  } catch (error) {
+    logOpenRouterDebug("OpenRouter network error", {
+      provider: "openrouter",
+      model: request?.model ?? defaultOpenRouterModel,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { ok: false, status: "offline", message: "OpenRouter is unreachable. Check your internet connection." };
+  }
+}
+
+async function sendOpenRouterChat(apiKey: string, request: OpenRouterChatRequest, isTest: boolean) {
+  logOpenRouterDebug("Sending OpenRouter chat request", {
+    provider: "openrouter",
+    model: request.model,
+    requestType: isTest ? "connection-test" : "chat",
+  });
+
+  const response = await fetch(openRouterEndpoint, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://github.com/ArturKamnev/todo-list",
+      "X-Title": "Todo AI",
+    },
+    body: JSON.stringify({
+      model: request.model,
+      messages: request.messages,
+      stream: false,
+    }),
+  });
+
+  logOpenRouterDebug("OpenRouter HTTP response", {
+    provider: "openrouter",
+    model: request.model,
+    httpStatus: response.status,
+  });
+
+  const bodyText = await response.text();
+  if (!response.ok) {
+    const errorMessage = readOpenRouterErrorMessage(bodyText, response.status);
+    const status = mapOpenRouterHttpStatus(response.status);
+    logOpenRouterDebug("OpenRouter error response", {
+      provider: "openrouter",
+      model: request.model,
+      httpStatus: response.status,
+      sanitizedErrorBody: sanitizeProviderBody(bodyText),
+    });
+    return { ok: false, status, httpStatus: response.status, message: errorMessage, model: request.model };
+  }
+
+  const data = parseJsonSafely(bodyText);
+  const content = readOpenRouterContent(data);
+  logOpenRouterDebug("OpenRouter assistant content", {
+    provider: "openrouter",
+    model: request.model,
+    httpStatus: response.status,
+    rawAssistantContent: content,
+  });
+  if (!content) {
+    return {
+      ok: false,
+      status: "unexpected-response" satisfies OpenRouterStatus,
+      httpStatus: response.status,
+      message: "OpenRouter returned a valid response, but no assistant text was found.",
+      model: request.model,
+    };
+  }
+  return { ok: true, status: "connected" satisfies OpenRouterStatus, model: request.model, content, httpStatus: response.status };
+}
+
+function readOpenRouterRequest(value: unknown): OpenRouterChatRequest | null {
+  if (!isRecord(value) || !Array.isArray(value.messages)) return null;
+  const messages = value.messages
+    .map((message) => {
+      if (!isRecord(message) || (message.role !== "system" && message.role !== "user" && message.role !== "assistant") || typeof message.content !== "string") return null;
+      return { role: message.role, content: message.content.slice(0, 12000) };
+    })
+    .filter((message): message is { role: "system" | "user" | "assistant"; content: string } => Boolean(message));
+  if (!messages.length) return null;
+  return { messages, model: readOpenRouterModel(value.model) };
+}
+
+function readOpenRouterModel(value: unknown) {
+  return typeof value === "string" && openRouterModels.has(value) ? value : defaultOpenRouterModel;
+}
+
+function readOpenRouterContent(value: unknown) {
+  if (!isRecord(value) || !Array.isArray(value.choices)) return "";
+  const choice = value.choices[0];
+  if (!isRecord(choice) || !isRecord(choice.message) || typeof choice.message.content !== "string") return "";
+  return choice.message.content.trim();
+}
+
+function mapOpenRouterHttpStatus(status: number): OpenRouterStatus {
+  if (status === 401 || status === 403) return "invalid-key";
+  if (status === 402) return "billing-issue";
+  if (status === 404) return "model-unavailable";
+  if (status === 429) return "rate-limited";
+  if (status === 502 || status === 503) return "provider-unavailable";
+  return "provider-error";
+}
+
+function readOpenRouterErrorMessage(bodyText: string, status: number) {
+  const payload = parseJsonSafely(bodyText);
+  const fallback = openRouterStatusMessage(status);
+  if (isRecord(payload)) {
+    const error = payload.error;
+    if (isRecord(error) && typeof error.message === "string") return addOpenRouterStatusHint(sanitizeProviderMessage(error.message), fallback, status);
+    if (typeof payload.message === "string") return addOpenRouterStatusHint(sanitizeProviderMessage(payload.message), fallback, status);
+  }
+  const sanitized = sanitizeProviderBody(bodyText);
+  return sanitized ? addOpenRouterStatusHint(sanitizeProviderMessage(sanitized), fallback, status) : fallback;
+}
+
+function addOpenRouterStatusHint(message: string, fallback: string, status: number) {
+  if (![402, 429, 502, 503].includes(status)) return message;
+  if (!message || message === fallback) return fallback;
+  const combined = `${message} ${fallback}`;
+  return combined.length > 320 ? `${combined.slice(0, 317)}...` : combined;
+}
+
+function openRouterStatusMessage(status: number) {
+  if (status === 401 || status === 403) return "Invalid API key.";
+  if (status === 402) return "Free model unavailable or this account cannot use free requests. Check your OpenRouter balance.";
+  if (status === 404) return "Model unavailable or invalid model ID.";
+  if (status === 429) return "Free request limit reached. Try again later.";
+  if (status === 502 || status === 503) return "Selected provider unavailable. Try again or switch to Auto Free Model.";
+  return "OpenRouter could not complete the request.";
+}
+
+function parseJsonSafely(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeProviderBody(value: string) {
+  const sanitized = value
+    .replace(/sk-or-v1-[A-Za-z0-9_-]+/g, "sk-or-v1-[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return sanitized.length > 800 ? `${sanitized.slice(0, 797)}...` : sanitized;
+}
+
+function sanitizeProviderMessage(value: string) {
+  const sanitized = sanitizeProviderBody(value);
+  return sanitized.length > 240 ? `${sanitized.slice(0, 237)}...` : sanitized || "OpenRouter could not complete the request.";
+}
+
+function logOpenRouterDebug(message: string, data: Record<string, string | number | boolean | undefined>) {
+  if (!isDev) return;
+  console.info(`[Todo AI] ${message}`, data);
 }
 
 function normalizePullStep(status: string | undefined) {

@@ -13,9 +13,9 @@ export type RepeatType = "daily" | "weekly" | "monthly" | "custom";
 export type RepeatUnit = "day" | "week" | "month";
 export type SortMode = "deadline" | "status";
 export type ThemeMode = "dark" | "light" | "system";
-export type AIProvider = "ollama" | "openai";
+export type AIProvider = "ollama" | "openrouter";
 export type Language = "en" | "ru";
-export type AIMode = "plan_day" | "create_tasks";
+export type AIMode = "plan_day" | "create_tasks" | "replan_tasks";
 export type ReminderOffsetMinutes = 0 | 5 | 10 | 30 | 60;
 
 export interface Subtask {
@@ -49,6 +49,7 @@ export interface Task {
   deadline?: string;
   projectId: string;
   durationMinutes: number | null;
+  reminderMinutes: ReminderOffsetMinutes | null;
   repeat: RepeatRule;
   nextRepeatAt: string | null;
   recurringParentId?: string;
@@ -65,10 +66,19 @@ export interface TaskDraft {
   scheduledAt: string | null;
   projectId: string;
   durationMinutes: number | null;
+  reminderMinutes: ReminderOffsetMinutes | null;
   repeat: RepeatRule;
   nextRepeatAt: string | null;
   tags: string[];
   subtasks: Subtask[];
+}
+
+export interface AvailabilityBlock {
+  id: string;
+  label: string;
+  weekdays: number[];
+  startTime: string;
+  endTime: string;
 }
 
 export interface AssistantMessage {
@@ -89,9 +99,10 @@ export interface UserSettings {
   aiProvider: AIProvider;
   aiBaseUrl: string;
   localModel: string;
-  apiKey: string;
+  cloudModel: string;
   notifications: boolean;
   defaultReminderMinutes: ReminderOffsetMinutes;
+  availabilityBlocks: AvailabilityBlock[];
   onboardingCompleted: boolean;
   startupBehavior: "dashboard" | "today" | "last-view";
   autoPlanDay: boolean;

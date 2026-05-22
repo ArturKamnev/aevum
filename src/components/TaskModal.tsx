@@ -1,7 +1,7 @@
 import { CalendarX, Save, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useI18n } from "../i18n";
-import type { Project, RepeatRule, RepeatUnit, Task, TaskDraft } from "../types";
+import type { Project, ReminderOffsetMinutes, RepeatRule, RepeatUnit, Task, TaskDraft } from "../types";
 import { combineDateAndTime, getScheduleDate, getScheduleTime, getTodayISO } from "../utils/date";
 import { calculateNextRepeatAt, defaultRepeat } from "../utils/recurrence";
 
@@ -49,6 +49,7 @@ export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalPr
   const [time, setTime] = useState("");
   const [durationPreset, setDurationPreset] = useState("");
   const [customDuration, setCustomDuration] = useState("");
+  const [reminderMinutes, setReminderMinutes] = useState<ReminderOffsetMinutes | null>(null);
   const [repeatPreset, setRepeatPreset] = useState<RepeatPreset>("none");
   const [repeatInterval, setRepeatInterval] = useState(1);
   const [repeatUnit, setRepeatUnit] = useState<RepeatUnit>("day");
@@ -64,6 +65,7 @@ export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalPr
     const duration = task?.durationMinutes ?? null;
     setDurationPreset(duration && [15, 30, 60, 120].includes(duration) ? String(duration) : duration ? "custom" : "");
     setCustomDuration(duration && ![15, 30, 60, 120].includes(duration) ? String(duration) : "");
+    setReminderMinutes(task?.reminderMinutes ?? null);
     const repeat = task?.repeat ?? defaultRepeat;
     setRepeatPreset(repeatToPreset(repeat));
     setRepeatInterval(repeat.interval);
@@ -91,6 +93,7 @@ export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalPr
       scheduledAt,
       projectId: projectId || projects[0]?.id || "uncategorized",
       durationMinutes,
+      reminderMinutes,
       repeat,
       nextRepeatAt: calculateNextRepeatAt({ scheduledAt, repeat }),
       tags: task?.tags ?? [],
@@ -149,6 +152,18 @@ export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalPr
             </select>
           </label>
         </div>
+
+        <label className="task-modal__field">
+          <span>{t("task.reminder")}</span>
+          <select value={reminderMinutes ?? ""} onChange={(event) => setReminderMinutes(event.target.value === "" ? null : Number(event.target.value) as ReminderOffsetMinutes)}>
+            <option value="">{t("task.reminderDefault")}</option>
+            <option value={0}>{t("settings.reminderAtTime")}</option>
+            <option value={5}>{t("settings.reminder5")}</option>
+            <option value={10}>{t("settings.reminder10")}</option>
+            <option value={30}>{t("settings.reminder30")}</option>
+            <option value={60}>{t("settings.reminder60")}</option>
+          </select>
+        </label>
 
         {durationPreset === "custom" && (
           <label className="task-modal__field">

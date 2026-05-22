@@ -1,5 +1,5 @@
 import { projects as seedProjects } from "../data/sampleData";
-import type { Project, Task } from "../types";
+import type { Project, ReminderOffsetMinutes, Task } from "../types";
 import { normalizeScheduledAt } from "../utils/date";
 import { calculateNextRepeatAt, migrateLegacyRepeat, normalizeRepeat } from "../utils/recurrence";
 
@@ -74,6 +74,7 @@ function migrateTask(value: unknown): Task | undefined {
     scheduledAt,
     projectId: typeof value.projectId === "string" ? value.projectId : seedProjects[0]?.id ?? uncategorizedProject.id,
     durationMinutes: typeof value.durationMinutes === "number" && value.durationMinutes > 0 ? Math.floor(value.durationMinutes) : null,
+    reminderMinutes: readReminderMinutes(value.reminderMinutes),
     repeat,
     nextRepeatAt: normalizeScheduledAt(typeof value.nextRepeatAt === "string" ? value.nextRepeatAt : null),
     recurringParentId: typeof value.recurringParentId === "string" ? value.recurringParentId : undefined,
@@ -95,6 +96,10 @@ function migrateTask(value: unknown): Task | undefined {
     ...migratedTask,
     nextRepeatAt: migratedTask.nextRepeatAt ?? calculateNextRepeatAt(migratedTask),
   };
+}
+
+function readReminderMinutes(value: unknown): ReminderOffsetMinutes | null {
+  return value === 0 || value === 5 || value === 10 || value === 30 || value === 60 ? value : null;
 }
 
 function migrateProject(value: unknown): Project | undefined {

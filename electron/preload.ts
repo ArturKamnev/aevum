@@ -23,6 +23,11 @@ contextBridge.exposeInMainWorld("todoAI", {
     ipcRenderer.on("ollama:pull-progress", listener);
     return () => ipcRenderer.removeListener("ollama:pull-progress", listener);
   },
+  setOpenRouterApiKey: (apiKey: string) => ipcRenderer.invoke("openrouter:set-api-key", apiKey),
+  hasOpenRouterApiKey: () => ipcRenderer.invoke("openrouter:has-api-key"),
+  deleteOpenRouterApiKey: () => ipcRenderer.invoke("openrouter:delete-api-key"),
+  testOpenRouterConnection: (model: string) => ipcRenderer.invoke("openrouter:test-connection", model),
+  chatOpenRouter: (payload: unknown) => ipcRenderer.invoke("ai:chat-openrouter", payload),
   scheduleTaskNotifications: (tasks: unknown[], settings: unknown) => ipcRenderer.invoke("notifications:schedule", tasks, settings),
   showTestNotification: () => ipcRenderer.invoke("notifications:test"),
 });

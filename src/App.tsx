@@ -26,9 +26,10 @@ const defaultSettings: UserSettings = {
   aiProvider: "ollama",
   aiBaseUrl: "http://localhost:11434",
   localModel: "llama3.1:latest",
-  apiKey: "",
+  cloudModel: "openrouter/free",
   notifications: true,
   defaultReminderMinutes: 0,
+  availabilityBlocks: [],
   onboardingCompleted: false,
   startupBehavior: "dashboard",
   autoPlanDay: true,
@@ -36,12 +37,18 @@ const defaultSettings: UserSettings = {
 
 const settingsStorageKey = "todo-ai-settings";
 const aiMessagesStorageKey = "todo-ai-ai-messages";
+const cloudModelOptions = new Set(["openrouter/free", "deepseek/deepseek-v4-flash:free"]);
 
 function loadSettings(theme: UserSettings["theme"], language: UserSettings["language"]): UserSettings {
   try {
     const stored = window.localStorage.getItem(settingsStorageKey);
     if (!stored) return { ...defaultSettings, theme, language };
-    return { ...defaultSettings, ...JSON.parse(stored), theme, language } as UserSettings;
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+    delete parsed.apiKey;
+    if (typeof parsed.cloudModel !== "string" || !cloudModelOptions.has(parsed.cloudModel)) {
+      parsed.cloudModel = defaultSettings.cloudModel;
+    }
+    return { ...defaultSettings, ...parsed, theme, language } as UserSettings;
   } catch {
     return { ...defaultSettings, theme, language };
   }
@@ -312,6 +319,7 @@ export function App() {
             addProject={addProject}
             addTask={addTask}
             messages={messages}
+            onUpdateTask={updateTask}
             projects={appProjects}
             setMessages={setMessages}
             settings={settings}

@@ -2,6 +2,7 @@ import { Bot, CalendarDays, Check, ChevronDown, Clock3, Loader2, Pencil, Repeat2
 import { useState } from "react";
 import { ProjectBadge } from "./Badges";
 import { useI18n } from "../i18n";
+import { AIProviderError } from "../services/aiService";
 import type { Project, Subtask, Task } from "../types";
 import { formatScheduleLabel } from "../utils/date";
 import { describeRepeat } from "../utils/recurrence";
@@ -61,7 +62,7 @@ export function TaskCard({
       if (import.meta.env.DEV) {
         console.error("[Todo AI] Failed to break down task", error);
       }
-      setBreakdownError(t("assistant.responseError"));
+      setBreakdownError(formatBreakdownError(error, t));
     } finally {
       setIsBreakingDown(false);
     }
@@ -230,6 +231,22 @@ function formatDuration(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
+function formatBreakdownError(error: unknown, t: ReturnType<typeof useI18n>["t"]) {
+  if (error instanceof AIProviderError) {
+    if (error.code === "openrouter_missing_key") return t("settings.openRouterMissingKey");
+    if (error.code === "openrouter_invalid_key") return error.message || t("settings.openRouterInvalidKey");
+    if (error.code === "openrouter_billing_issue") return error.message || t("settings.openRouterBillingIssue");
+    if (error.code === "openrouter_model_unavailable") return error.message || t("settings.openRouterModelUnavailable");
+    if (error.code === "openrouter_rate_limited") return error.message || t("settings.openRouterRateLimited");
+    if (error.code === "openrouter_offline") return t("settings.openRouterOffline");
+    if (error.code === "openrouter_provider_error") return error.message || t("settings.openRouterProviderError");
+    if (error.code === "invalid_ai_response") return t("assistant.responseError");
+    if (error.code === "model_missing") return error.message;
+    if (error.code === "ollama_not_running") return t("settings.ollamaNotRunning");
+  }
+  return t("assistant.responseError");
 }
 
 function formatRepeat(task: Task, t: ReturnType<typeof useI18n>["t"]) {

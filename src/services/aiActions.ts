@@ -7,6 +7,7 @@ export interface AIActionContext {
   projects: Project[];
   addTask: (task: TaskDraft) => Task;
   addProject: (project: Omit<Project, "id">) => Project;
+  updateTask?: (taskId: string, updates: Partial<Task>) => void;
 }
 
 export interface AIActionResult {
@@ -30,6 +31,21 @@ export function applyAssistantAction(action: AssistantAction | undefined, contex
     };
   }
 
+  if (action.type === "schedule_tasks") {
+    if (!context.updateTask) return { ok: false, message: "Task updates are not available." };
+    action.changes.forEach((change) => {
+      context.updateTask?.(change.taskId, {
+        scheduledAt: normalizeScheduledAt(change.scheduledAt),
+        durationMinutes: change.durationMinutes ?? null,
+      });
+    });
+    return {
+      ok: true,
+      message: `${action.changes.length} tasks scheduled.`,
+      taskIds: action.changes.map((change) => change.taskId),
+    };
+  }
+
   return { ok: false, message: "Unsupported AI action." };
 }
 
@@ -44,6 +60,7 @@ function createTaskFromDraft(draft: AITaskDraft, context: AIActionContext) {
     scheduledAt,
     projectId: project?.id ?? "workspace",
     durationMinutes: draft.durationMinutes ?? null,
+    reminderMinutes: draft.reminderMinutes ?? null,
     repeat,
     nextRepeatAt: calculateNextRepeatAt({ scheduledAt, repeat }),
     tags: draft.tags ?? [],

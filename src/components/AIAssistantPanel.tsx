@@ -9,6 +9,7 @@ import { formatScheduleLabel } from "../utils/date";
 interface AIAssistantPanelProps {
   addProject: (project: Omit<Project, "id">) => Project;
   addTask: (task: TaskDraft) => Task;
+  onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   messages: AssistantMessage[];
   projects: Project[];
   setMessages: (messages: AssistantMessage[]) => void;
@@ -27,11 +28,17 @@ const modeMeta: Record<AIMode, { title: TranslationKey; description: Translation
     description: "assistant.mode.createTasksDescription",
     placeholder: "assistant.placeholder.createTasks",
   },
+  replan_tasks: {
+    title: "assistant.mode.replanTasks",
+    description: "assistant.mode.replanTasksDescription",
+    placeholder: "assistant.placeholder.replanTasks",
+  },
 };
 
 export function AIAssistantPanel({
   addProject,
   addTask,
+  onUpdateTask,
   messages,
   projects,
   setMessages,
@@ -65,7 +72,7 @@ export function AIAssistantPanel({
 
     try {
       const result = await chatWithAssistant(trimmed, tasks, settings, mode);
-      if (mode === "create_tasks" && result.action) {
+      if (result.action) {
         setPendingAction(result.action);
       }
       setMessages([...nextMessages, result.message]);
@@ -74,7 +81,7 @@ export function AIAssistantPanel({
       console.error("[Todo AI] Assistant request failed", {
         provider: settings.aiProvider,
         baseUrl: settings.aiBaseUrl,
-        model: settings.localModel,
+        model: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
         message: aiError,
       });
       setPendingRetry(trimmed);
@@ -104,13 +111,13 @@ export function AIAssistantPanel({
   function applyPendingTasks() {
     if (!pendingAction) return;
     try {
-      const actionResult = applyAssistantAction(pendingAction, { addProject, addTask, projects });
+      const actionResult = applyAssistantAction(pendingAction, { addProject, addTask, projects, updateTask: onUpdateTask });
       setMessages([
         ...messages,
         {
           id: `message-${Date.now()}-action`,
           role: actionResult.ok ? "action" : "error",
-          content: actionResult.ok ? t("assistant.tasksCreated") : t("assistant.couldNotSaveTask"),
+          content: actionResult.ok ? getAppliedMessage(pendingAction, t) : t("assistant.couldNotSaveTask"),
           createdAt: new Date().toISOString(),
           metadata: { actionType: pendingAction.type },
         },
@@ -127,7 +134,7 @@ export function AIAssistantPanel({
         {
           id: `message-${Date.now()}-save-error`,
           role: "error",
-          content: t("assistant.couldNotSaveTask"),
+          content: pendingAction.type === "schedule_tasks" ? t("assistant.couldNotSavePlan") : t("assistant.couldNotSaveTask"),
           createdAt: new Date().toISOString(),
           metadata: { actionType: pendingAction.type },
         },
@@ -196,7 +203,7 @@ export function AIAssistantPanel({
         )}
       </div>
 
-      {pendingAction && (
+      {pendingAction?.type === "create_tasks" && (
         <div className="assistant-task-preview">
           <div className="assistant-task-preview__header">
             <div>
@@ -214,8 +221,39 @@ export function AIAssistantPanel({
                 <strong>{task.title}</strong>
                 {task.description ? <p>{task.description}</p> : null}
                 <span>{formatScheduleLabel(task.scheduledAt ?? null, scheduleLabels, language)}</span>
+                {task.durationMinutes ? <span>{task.durationMinutes} min</span> : null}
+                {task.reminderMinutes !== null && task.reminderMinutes !== undefined ? <span>{formatReminder(task.reminderMinutes, t)}</span> : null}
+                {task.projectName ? <span>{task.projectName}</span> : null}
               </article>
             ))}
+          </div>
+        </div>
+      )}
+
+      {pendingAction?.type === "schedule_tasks" && (
+        <div className="assistant-task-preview">
+          <div className="assistant-task-preview__header">
+            <div>
+              <strong>{pendingAction.mode === "replan_tasks" ? t("assistant.replanPreviewTitle") : t("assistant.planPreviewTitle")}</strong>
+              <span>{t("assistant.planPreviewDescription")}</span>
+            </div>
+            <button className="button button--primary" onClick={applyPendingTasks} type="button">
+              <CheckCircle2 size={16} />
+              {t("assistant.applyPlan")}
+            </button>
+          </div>
+          <div className="assistant-task-preview__grid">
+            {pendingAction.changes.map((change) => {
+              const task = tasks.find((item) => item.id === change.taskId);
+              return (
+                <article className="assistant-task-preview__card" key={`${change.taskId}-${change.scheduledAt}`}>
+                  <strong>{task?.title ?? change.taskId}</strong>
+                  <span>{formatScheduleLabel(change.scheduledAt, scheduleLabels, language)}</span>
+                  <span>{change.durationMinutes ?? task?.durationMinutes ?? 30} min</span>
+                  {change.reason ? <p>{change.reason}</p> : null}
+                </article>
+              );
+            })}
           </div>
         </div>
       )}
@@ -293,8 +331,28 @@ function normalizeAIError(error: unknown, t: (key: TranslationKey) => string) {
     if (error.code === "cors_blocked") return t("settings.ollamaCors");
     if (error.code === "unexpected_response") return t("settings.ollamaUnexpected");
     if (error.code === "invalid_ai_response") return t("assistant.responseError");
+    if (error.code === "openrouter_missing_key") return t("settings.openRouterMissingKey");
+    if (error.code === "openrouter_invalid_key") return error.message || t("settings.openRouterInvalidKey");
+    if (error.code === "openrouter_billing_issue") return error.message || t("settings.openRouterBillingIssue");
+    if (error.code === "openrouter_model_unavailable") return error.message || t("settings.openRouterModelUnavailable");
+    if (error.code === "openrouter_rate_limited") return error.message || t("settings.openRouterRateLimited");
+    if (error.code === "openrouter_offline") return t("settings.openRouterOffline");
+    if (error.code === "openrouter_provider_error") return error.message || t("settings.openRouterProviderError");
     return t("settings.ollamaWrongUrl");
   }
 
   return error instanceof Error ? error.message : t("settings.ollamaUnexpected");
+}
+
+function getAppliedMessage(action: AssistantAction, t: (key: TranslationKey) => string) {
+  if (action.type === "schedule_tasks") return t("assistant.planApplied");
+  return t("assistant.tasksCreated");
+}
+
+function formatReminder(value: number, t: (key: TranslationKey) => string) {
+  if (value === 0) return t("settings.reminderAtTime");
+  if (value === 5) return t("settings.reminder5");
+  if (value === 10) return t("settings.reminder10");
+  if (value === 30) return t("settings.reminder30");
+  return t("settings.reminder60");
 }

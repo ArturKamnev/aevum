@@ -16,6 +16,11 @@ interface Window {
     deleteOllamaModel: (modelName: string) => Promise<{ ok: boolean; modelName?: string; status?: string; message?: string }>;
     cancelOllamaPull: () => Promise<{ ok: boolean }>;
     onOllamaPullProgress: (callback: (payload: OllamaPullProgress) => void) => () => void;
+    setOpenRouterApiKey: (apiKey: string) => Promise<{ ok: boolean; status?: string; message?: string }>;
+    hasOpenRouterApiKey: () => Promise<{ ok: boolean; hasKey: boolean }>;
+    deleteOpenRouterApiKey: () => Promise<{ ok: boolean }>;
+    testOpenRouterConnection: (model: string) => Promise<OpenRouterResult>;
+    chatOpenRouter: (payload: OpenRouterRequest) => Promise<OpenRouterResult>;
     scheduleTaskNotifications: (tasks: NotificationTaskPayload[], settings: NotificationSettingsPayload) => Promise<{ ok: boolean; scheduled: number }>;
     showTestNotification: () => Promise<{ ok: boolean; supported: boolean }>;
   };
@@ -58,9 +63,25 @@ type NotificationTaskPayload = {
   description?: string;
   status: "active" | "completed";
   scheduledAt: string | null;
+  reminderMinutes?: 0 | 5 | 10 | 30 | 60 | null;
 };
 
 type NotificationSettingsPayload = {
   enabled: boolean;
   defaultReminderMinutes: 0 | 5 | 10 | 30 | 60;
+};
+
+type OpenRouterRequest = {
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  model: string;
+  json?: boolean;
+};
+
+type OpenRouterResult = {
+  ok: boolean;
+  status: "connected" | "missing-key" | "invalid-key" | "billing-issue" | "model-unavailable" | "rate-limited" | "provider-unavailable" | "offline" | "provider-error" | "unexpected-response" | "invalid" | "invalid-request";
+  content?: string;
+  model?: string;
+  message?: string;
+  httpStatus?: number;
 };

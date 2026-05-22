@@ -30,6 +30,7 @@ export function QuickAddTask({ projects, onAddTask }: QuickAddTaskProps) {
       scheduledAt: combineDateAndTime(date, time),
       projectId: projectId || projects[0]?.id || "workspace",
       durationMinutes,
+      reminderMinutes: null,
       repeat: { ...defaultRepeat },
       nextRepeatAt: null,
       tags: [],
