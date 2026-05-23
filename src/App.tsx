@@ -324,6 +324,8 @@ export function App() {
             setMessages={setMessages}
             settings={settings}
             tasks={tasks}
+            updateSettings={updateSettings}
+            setActiveView={setActiveView}
           />
         )}
 

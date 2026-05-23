@@ -96,12 +96,127 @@ export class AIProviderError extends Error {
   }
 }
 
+function buildGuidePrompt(taskContext: Task[], language: UserSettings["language"]) {
+  const taskSummary = taskContext
+    .slice(0, 10)
+    .map((task) => `- ${task.title} (status: ${task.status}, scheduled: ${task.scheduledAt ?? "none"})`)
+    .join("\n");
+
+  const languagePrompt = language === "ru"
+    ? "Отвечай только на русском языке. Ответ должен быть кратким и полезным. Объясняй функции приложения, если пользователь спрашивает о них."
+    : "Respond in English only. Keep responses concise and helpful. Explain app features if the user asks.";
+
+  return `You are Aevum, a desktop productivity assistant.
+Current date: ${getTodayISO()}.
+${languagePrompt}
+You are currently in Guide Mode. Help the user with navigation, explaining features, or general guidance.
+You cannot create, schedule, or modify tasks directly in this mode.
+If the user asks you to create or plan tasks, politely decline and instruct them to select the appropriate tool (Create Tasks or Plan My Day) from the '+' tools menu.
+
+User's tasks:
+${taskSummary || "No tasks yet."}`;
+}
+
+function authorizeActionResult(
+  result: AIChatResult,
+  mode: AIMode | null,
+  language: UserSettings["language"]
+): AIChatResult {
+  const action = result.action;
+  if (!action) return result; // No action to authorize, always allowed
+
+  // Guide Mode: reject all task or planning actions
+  if (mode === null) {
+    return {
+      message: createAssistantMessage(
+        language === "ru"
+          ? "Чтобы создать или спланировать задачи, пожалуйста, выберите соответствующий инструмент в меню +."
+          : "To create or plan tasks, please select the appropriate tool from the + menu."
+      ),
+      action: undefined,
+    };
+  }
+
+  // Create Tasks mode: allow only create_tasks action
+  if (mode === "create_tasks") {
+    if (action.type === "create_tasks") {
+      return result;
+    } else {
+      return {
+        message: createAssistantMessage(
+          language === "ru"
+            ? "В этом режиме разрешено только создание задач. Пожалуйста, выберите инструмент «Спланировать день»."
+            : "Only task creation is allowed in this mode. Please select the Plan My Day tool."
+        ),
+        action: undefined,
+      };
+    }
+  }
+
+  // Plan My Day mode: allow only schedule_tasks action
+  if (mode === "plan_day" || mode === "replan_tasks") {
+    if (action.type === "schedule_tasks") {
+      return result;
+    } else {
+      return {
+        message: createAssistantMessage(
+          language === "ru"
+            ? "В этом режиме разрешено только планирование задач. Пожалуйста, выберите инструмент «Создать задачи»."
+            : "Only task scheduling is allowed in this mode. Please select the Create Tasks tool."
+        ),
+        action: undefined,
+      };
+    }
+  }
+
+  return result;
+}
+
 export async function chatWithAssistant(
   userMessage: string,
   taskContext: Task[],
   settings: UserSettings,
-  mode: AIMode,
+  mode: AIMode | null,
 ): Promise<AIChatResult> {
+  const result = await chatWithAssistantInternal(userMessage, taskContext, settings, mode);
+  return authorizeActionResult(result, mode, settings.language);
+}
+
+async function chatWithAssistantInternal(
+  userMessage: string,
+  taskContext: Task[],
+  settings: UserSettings,
+  mode: AIMode | null,
+): Promise<AIChatResult> {
+  if (mode === null) {
+    const msg = userMessage.toLowerCase().trim();
+    const isActionRequest =
+      msg.startsWith("create ") || msg.startsWith("add ") || msg.startsWith("schedule ") || msg.startsWith("plan ") ||
+      msg.startsWith("создай") || msg.startsWith("добавь") || msg.startsWith("запланируй") || msg.startsWith("спланируй") || msg.startsWith("распланируй") ||
+      msg.includes("создай задачу") || msg.includes("создать задачу") || msg.includes("добавь задачу") || msg.includes("добавить задачу");
+
+    if (isActionRequest) {
+      return {
+        message: createAssistantMessage(
+          settings.language === "ru"
+            ? "Чтобы создать или спланировать задачи, пожалуйста, выберите соответствующий инструмент в меню +."
+            : "To create or plan tasks, please select the appropriate tool from the + menu."
+        ),
+        action: undefined,
+      };
+    }
+
+    const systemPrompt = buildGuidePrompt(taskContext, settings.language);
+    const raw = await requestAIChat(settings, [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ]);
+    return {
+      message: createAssistantMessage(raw),
+      action: undefined,
+    };
+  }
+
   if (mode === "plan_day") {
     const raw = await requestAIChat(settings, [
       { role: "system", content: buildPlanPrompt(taskContext, settings.availabilityBlocks, settings.language) },
