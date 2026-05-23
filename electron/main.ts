@@ -8,7 +8,9 @@ import path from "node:path";
 
 const isDev = !app.isPackaged;
 const ollamaDownloadUrl = "https://ollama.com/download";
-const openRouterService = "Todo AI";
+const appName = "Aevum";
+const openRouterService = "Aevum";
+const legacyOpenRouterService = ["Todo", "AI"].join(" ");
 const openRouterAccount = "openrouter";
 const defaultOpenRouterModel = "openrouter/free";
 const openRouterModels = new Set(["openrouter/free", "deepseek/deepseek-v4-flash:free"]);
@@ -98,8 +100,8 @@ function createWindow() {
     height: 920,
     minWidth: 1040,
     minHeight: 680,
-    title: "Todo AI",
-    backgroundColor: nativeTheme.shouldUseDarkColors ? "#12100d" : "#f5f1ea",
+    title: appName,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#0c0c0f" : "#f5f1ea",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
@@ -117,7 +119,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  app.setAppUserModelId("com.kamartur.todoai");
+  app.setAppUserModelId("com.kamartur.aevum");
   ipcMain.handle("app:get-theme", () => nativeTheme.shouldUseDarkColors ? "dark" : "light");
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:clear-cache", async () => {
@@ -167,7 +169,7 @@ app.whenReady().then(() => {
     return scheduleTaskNotifications(tasks, settings);
   });
   ipcMain.handle("notifications:test", () => showTaskNotification({
-    title: "Todo AI",
+    title: appName,
     body: "Notifications are ready.",
   }));
   createWindow();
@@ -478,7 +480,7 @@ async function setOpenRouterApiKey(value: unknown) {
 }
 
 async function hasOpenRouterApiKey() {
-  const apiKey = await keytar.getPassword(openRouterService, openRouterAccount);
+  const apiKey = await getOpenRouterApiKey();
   return { ok: true, hasKey: Boolean(apiKey) };
 }
 
@@ -504,7 +506,7 @@ async function testOpenRouterConnection(selectedModel?: unknown) {
 }
 
 async function chatOpenRouter(payload: unknown, isTest = false) {
-  const apiKey = await keytar.getPassword(openRouterService, openRouterAccount);
+  const apiKey = await getOpenRouterApiKey();
   if (!apiKey) return { ok: false, status: "missing-key", message: "OpenRouter API key is missing." };
   const request = readOpenRouterRequest(payload);
   if (!request) return { ok: false, status: "invalid-request", message: "Invalid AI request." };
@@ -534,7 +536,7 @@ async function sendOpenRouterChat(apiKey: string, request: OpenRouterChatRequest
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
       "HTTP-Referer": "https://github.com/ArturKamnev/todo-list",
-      "X-Title": "Todo AI",
+      "X-Title": appName,
     },
     body: JSON.stringify({
       model: request.model,
@@ -665,7 +667,17 @@ function sanitizeProviderMessage(value: string) {
 
 function logOpenRouterDebug(message: string, data: Record<string, string | number | boolean | undefined>) {
   if (!isDev) return;
-  console.info(`[Todo AI] ${message}`, data);
+  console.info(`[Aevum] ${message}`, data);
+}
+
+async function getOpenRouterApiKey() {
+  const apiKey = await keytar.getPassword(openRouterService, openRouterAccount);
+  if (apiKey) return apiKey;
+
+  const legacyApiKey = await keytar.getPassword(legacyOpenRouterService, openRouterAccount);
+  if (!legacyApiKey) return null;
+  await keytar.setPassword(openRouterService, openRouterAccount, legacyApiKey);
+  return legacyApiKey;
 }
 
 function normalizePullStep(status: string | undefined) {

@@ -78,7 +78,7 @@ export function AIAssistantPanel({
       setMessages([...nextMessages, result.message]);
     } catch (error) {
       const aiError = normalizeAIError(error, t);
-      console.error("[Todo AI] Assistant request failed", {
+      console.error("[Aevum] Assistant request failed", {
         provider: settings.aiProvider,
         baseUrl: settings.aiBaseUrl,
         model: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
@@ -127,7 +127,7 @@ export function AIAssistantPanel({
       }
     } catch (error) {
       if (import.meta.env.DEV) {
-        console.error("[Todo AI] Failed to save AI-created tasks", error);
+        console.error("[Aevum] Failed to save AI-created tasks", error);
       }
       setMessages([
         ...messages,

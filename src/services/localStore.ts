@@ -43,7 +43,7 @@ function loadArray<T>(key: string, migrate: (value: unknown) => T | undefined, s
     return parsed.map(migrate).filter((item): item is T => Boolean(item));
   } catch (error) {
     if (import.meta.env.DEV) {
-      console.warn(`[Todo AI] Failed to load ${key}`, error);
+      console.warn(`[Aevum] Failed to load ${key}`, error);
     }
     return [];
   }
@@ -54,7 +54,7 @@ function saveArray<T>(key: string, value: T[]) {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch (error) {
     if (import.meta.env.DEV) {
-      console.warn(`[Todo AI] Failed to save ${key}`, error);
+      console.warn(`[Aevum] Failed to save ${key}`, error);
     }
   }
 }

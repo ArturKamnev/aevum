@@ -1,10 +1,12 @@
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import { Bell, Check, Cpu, Download, KeyRound, Languages, Loader2, Moon, Plus, Sparkles, Sun, Monitor } from "lucide-react";
+import { Bell, Check, Cpu, Download, KeyRound, Languages, Loader2, Moon, Plus, Sun, Monitor } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { Language, Project, ReminderOffsetMinutes, TaskDraft, ThemeMode, UserSettings } from "../types";
 import { defaultRepeat } from "../utils/recurrence";
+import aevumLogoDark from "../../media/aevum-logo-dark.png";
+import aevumLogoLight from "../../media/aevum-logo-light.png";
 
 gsap.registerPlugin(useGSAP);
 
@@ -371,7 +373,10 @@ function WelcomeStep({ titleId }: { titleId: string }) {
   const { t } = useI18n();
   return (
     <section className="onboarding-panel onboarding-panel--welcome">
-      <span className="onboarding-panel__icon"><Sparkles size={24} /></span>
+      <span className="onboarding-panel__icon onboarding-panel__logo" aria-hidden="true">
+        <img className="brand-logo__image brand-logo__image--dark" src={aevumLogoDark} alt="" />
+        <img className="brand-logo__image brand-logo__image--light" src={aevumLogoLight} alt="" />
+      </span>
       <h2 id={titleId}>{t("onboarding.welcomeTitle")}</h2>
       <p>{t("onboarding.welcomeDescription")}</p>
     </section>

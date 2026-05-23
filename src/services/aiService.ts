@@ -444,7 +444,7 @@ Rules:
 }
 
 function buildBreakdownPrompt(task: Task, language: UserSettings["language"]) {
-  return `You are Todo AI inside a desktop task app.
+  return `You are Aevum inside a desktop task app.
 ${languageInstruction(language)}
 Return one valid JSON object only:
 {
@@ -470,7 +470,7 @@ function buildRepairPrompt(schema: StructuredSchema, language: UserSettings["lan
         ? `{"userMessage":"${copy(language).planUserMessage}","plan":[{"time":"09:00","title":"Plan item","description":"What to do."}],"action":{"type":"schedule_tasks","mode":"${schema}","changes":[{"taskId":"existing-task-id","scheduledAt":"2026-05-22T09:00","durationMinutes":30,"reason":"Fits available time."}]}}`
         : `{"userMessage":"${copy(language).subtasksUserMessage}","subtasks":["First step","Second step","Third step"]}`;
 
-  return `Convert the user's content into valid JSON for Todo AI.
+  return `Convert the user's content into valid JSON for Aevum.
 ${languageInstruction(language)}
 Return only one JSON object. No markdown fences. No commentary.
 Required schema:
@@ -486,7 +486,7 @@ function baseStructuredPrompt(taskContext: Task[], availabilityBlocks: Availabil
     .map((block) => `- ${block.label}: weekdays=${block.weekdays.join(",")} ${block.startTime}-${block.endTime}`)
     .join("\n");
 
-  return `You are Todo AI, a practical desktop productivity assistant.
+  return `You are Aevum, a practical desktop productivity assistant.
 Current date: ${getTodayISO()}.
 ${languageInstruction(language)}
 Follow the selected mode strictly. Keep wording concise and useful. Ask for clarification only when the request cannot be completed safely.
@@ -876,13 +876,13 @@ function copy(language: UserSettings["language"]) {
 
 function logAIDebug(message: string, data: Record<string, string | number | boolean | undefined>) {
   if (import.meta.env.DEV) {
-    console.info(`[Todo AI] ${message}`, data);
+    console.info(`[Aevum] ${message}`, data);
   }
 }
 
 function logAIError(error: AIProviderError) {
   if (import.meta.env.DEV) {
-    console.error("[Todo AI] AI provider error", {
+    console.error("[Aevum] AI provider error", {
       code: error.code,
       message: error.message,
       ...error.debug,
@@ -892,13 +892,13 @@ function logAIError(error: AIProviderError) {
 
 function logInvalidAIResponse(rawResponse: string, schema: StructuredSchema, phase: "initial" | "repair") {
   if (import.meta.env.DEV) {
-    console.error("[Todo AI] Invalid AI response", { schema, phase, rawResponse });
+    console.error("[Aevum] Invalid AI response", { schema, phase, rawResponse });
   }
 }
 
 function logSchemaValidationError(schema: StructuredSchema, validationError: string, rawAssistantContent: string, settings: UserSettings) {
   if (import.meta.env.DEV) {
-    console.error("[Todo AI] Schema validation error", {
+    console.error("[Aevum] Schema validation error", {
       provider: settings.aiProvider,
       model: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
       schema,

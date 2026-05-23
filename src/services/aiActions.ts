@@ -77,7 +77,7 @@ function resolveProject(projectName: string | undefined, context: AIActionContex
 
   const createdProject = context.addProject({
     name: projectName,
-    description: "Created by Todo AI.",
+    description: "Created by Aevum.",
     color: "var(--project-sage)",
   });
   context.projects.push(createdProject);

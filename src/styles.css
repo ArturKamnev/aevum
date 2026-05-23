@@ -20,22 +20,23 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: oklch(0.18 0.012 58);
-  --surface: oklch(0.215 0.012 58);
-  --surface-raised: oklch(0.255 0.014 58);
-  --surface-strong: oklch(0.305 0.016 58);
-  --sidebar: oklch(0.15 0.013 58);
-  --text: oklch(0.93 0.012 73);
-  --text-muted: oklch(0.68 0.018 72);
-  --text-soft: oklch(0.54 0.018 72);
-  --border: oklch(0.32 0.018 58);
-  --border-strong: oklch(0.42 0.025 58);
-  --accent: oklch(0.71 0.105 151);
-  --accent-strong: oklch(0.78 0.12 151);
-  --accent-text: oklch(0.17 0.026 150);
-  --danger: oklch(0.69 0.16 27);
-  --warning: oklch(0.78 0.12 73);
-  --shadow: 0 22px 80px oklch(0.08 0.01 58 / 0.42);
+  --bg: oklch(0.105 0.006 255);
+  --surface: oklch(0.145 0.006 255);
+  --surface-raised: oklch(0.185 0.007 255);
+  --surface-strong: oklch(0.245 0.008 255);
+  --sidebar: oklch(0.085 0.005 255);
+  --text: oklch(0.965 0.006 255);
+  --text-muted: oklch(0.755 0.01 255);
+  --text-soft: oklch(0.61 0.011 255);
+  --border: oklch(0.285 0.008 255);
+  --border-strong: oklch(0.395 0.01 255);
+  --accent: oklch(0.74 0.09 165);
+  --accent-strong: oklch(0.82 0.1 165);
+  --accent-text: oklch(0.12 0.018 165);
+  --danger: oklch(0.68 0.16 25);
+  --warning: oklch(0.78 0.12 78);
+  --shadow: 0 26px 86px oklch(0.04 0.004 255 / 0.62);
+  --shadow-xl: 0 34px 100px oklch(0.035 0.004 255 / 0.72);
 }
 
 :root[data-theme="light"] {
@@ -56,6 +57,7 @@
   --danger: oklch(0.57 0.17 27);
   --warning: oklch(0.62 0.13 73);
   --shadow: 0 24px 64px oklch(0.58 0.06 65 / 0.18);
+  --shadow-xl: 0 30px 76px oklch(0.58 0.06 65 / 0.2);
 }
 
 * {
@@ -137,7 +139,7 @@ textarea {
   width: 100%;
   height: 100%;
   background:
-    linear-gradient(180deg, color-mix(in oklch, var(--surface-raised) 62%, transparent), transparent 42%),
+    linear-gradient(180deg, color-mix(in oklch, var(--surface-raised) 48%, transparent), transparent 42%),
     var(--bg);
 }
 
@@ -178,6 +180,31 @@ textarea {
   background: color-mix(in oklch, var(--accent) 14%, transparent);
   border: 1px solid color-mix(in oklch, var(--accent) 28%, transparent);
   border-radius: var(--radius-md);
+}
+
+.brand-logo,
+.onboarding-panel__logo {
+  overflow: hidden;
+  background: transparent;
+  border-color: transparent;
+}
+
+.brand-logo__image {
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+:root[data-theme="dark"] .brand-logo__image--dark,
+:root[data-theme="light"] .brand-logo__image--light {
+  display: block;
+}
+
+.onboarding-panel__logo {
+  width: 56px;
+  height: 56px;
+  padding: 0;
 }
 
 .brand-row strong,
@@ -2080,8 +2107,8 @@ kbd {
   place-items: center;
   padding: 28px;
   background:
-    radial-gradient(circle at 50% 18%, color-mix(in oklch, var(--accent) 18%, transparent), transparent 32%),
-    color-mix(in oklch, var(--background) 88%, transparent);
+    radial-gradient(circle at 50% 18%, color-mix(in oklch, var(--accent) 13%, transparent), transparent 34%),
+    color-mix(in oklch, var(--bg) 88%, transparent);
   backdrop-filter: blur(14px);
 }
 

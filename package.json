@@ -1,8 +1,8 @@
 {
-  "name": "todo-ai",
-  "version": "1.1.2",
+  "name": "aevum",
+  "version": "1.1.3",
   "private": true,
-  "description": "Todo AI desktop productivity assistant",
+  "description": "Aevum desktop productivity assistant",
   "author": "ArturKamnev",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -20,8 +20,8 @@
     "url": "https://github.com/ArturKamnev/todo-list.git"
   },
   "build": {
-    "appId": "com.kamartur.todoai",
-    "productName": "Todo AI",
+    "appId": "com.kamartur.aevum",
+    "productName": "Aevum",
     "directories": {
       "output": "release"
     },
@@ -48,7 +48,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Todo AI"
+      "shortcutName": "Aevum"
     }
   },
   "dependencies": {

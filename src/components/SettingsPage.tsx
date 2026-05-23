@@ -339,7 +339,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
       setCacheStatus("success");
       setStorageNotice(t("settings.cacheCleared"));
     } catch (error) {
-      console.error("[Todo AI] Failed to clear app cache", error);
+      console.error("[Aevum] Failed to clear app cache", error);
       setCacheStatus("error");
     } finally {
       setConfirmAction(null);

@@ -7,10 +7,11 @@ import {
   LayoutDashboard,
   ListTodo,
   Settings,
-  Sparkles,
 } from "lucide-react";
 import { useI18n, type TranslationKey } from "../i18n";
 import type { Project, Task, ViewId } from "../types";
+import aevumLogoDark from "../../media/aevum-logo-dark.png";
+import aevumLogoLight from "../../media/aevum-logo-light.png";
 
 const navItems: Array<{ id: ViewId; labelKey: TranslationKey; icon: typeof LayoutDashboard }> = [
   { id: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
@@ -37,11 +38,12 @@ export function Sidebar({ activeView, setActiveView, projects, tasks }: SidebarP
     <aside className="sidebar">
       <div className="window-drag-region" />
       <div className="brand-row">
-        <div className="brand-mark">
-          <Sparkles size={17} />
+        <div className="brand-mark brand-logo" aria-hidden="true">
+          <img className="brand-logo__image brand-logo__image--dark" src={aevumLogoDark} alt="" />
+          <img className="brand-logo__image brand-logo__image--light" src={aevumLogoLight} alt="" />
         </div>
         <div>
-          <strong>Todo AI</strong>
+          <strong>Aevum</strong>
           <span>{t("app.tagline")}</span>
         </div>
       </div>

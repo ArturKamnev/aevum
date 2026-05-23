@@ -60,7 +60,7 @@ export function TaskCard({
       setSubtaskPreview(subtasks);
     } catch (error) {
       if (import.meta.env.DEV) {
-        console.error("[Todo AI] Failed to break down task", error);
+      console.error("[Aevum] Failed to break down task", error);
       }
       setBreakdownError(formatBreakdownError(error, t));
     } finally {
@@ -81,7 +81,7 @@ export function TaskCard({
       setIsExpanded(true);
     } catch (error) {
       if (import.meta.env.DEV) {
-        console.error("[Todo AI] Failed to save subtasks", error);
+        console.error("[Aevum] Failed to save subtasks", error);
       }
       setBreakdownError(t("assistant.couldNotSaveSubtasks"));
     }
