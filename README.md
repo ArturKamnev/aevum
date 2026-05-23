@@ -1,79 +1,263 @@
-# Todo AI
+<div align="center">
 
-Todo AI is an Electron, React, and TypeScript desktop app for task planning with local AI support.
+# ✅ Todo AI
 
-## Development
+### Умный desktop-планировщик задач с AI-ассистентом
 
-Install dependencies:
+Создавайте задачи обычным текстом, планируйте день, настраивайте повторения и используйте локальные или облачные нейросети в минималистичном Windows-приложении.
 
-```powershell
-npm install
-```
+<br />
 
-Start Vite and the Electron desktop app:
+![Version](https://img.shields.io/github/v/release/ArturKamnev/todo-list?label=version&color=6fb980)
+![Status](https://img.shields.io/badge/status-beta-f0ad4e)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D4)
+![AI](https://img.shields.io/badge/AI-Ollama%20%7C%20OpenRouter-8c78ff)
 
-```powershell
-npm run dev
-```
+<br />
 
-Build the renderer:
+[📥 Скачать приложение](https://github.com/ArturKamnev/todo-list/releases/latest)
+&nbsp;•&nbsp;
+[🐞 Сообщить о проблеме](https://github.com/ArturKamnev/todo-list/issues)
+&nbsp;•&nbsp;
+[📦 Все версии](https://github.com/ArturKamnev/todo-list/releases)
 
-```powershell
-npm run build
-```
+</div>
 
-## Windows Installer
+---
 
-Create a local Windows NSIS installer without publishing:
+> [!IMPORTANT]
+> ## 🧪 Todo AI находится в Beta-версии
+>
+> Приложение активно разрабатывается. Некоторые функции могут изменяться, а в отдельных сценариях возможны ошибки.
+>
+> Если вы нашли баг или хотите предложить улучшение, создайте обращение в разделе [Issues](https://github.com/ArturKamnev/todo-list/issues).
 
-```powershell
-npm run dist
-```
+---
 
-The installer and update metadata are written to `release/`. The installer is named like:
+## Что такое Todo AI?
+
+**Todo AI** — это приложение для планирования задач на Windows, в котором обычный todo-list объединён с AI-функциями, календарным планированием, визуализацией дня и напоминаниями.
+
+Вместо ручного заполнения множества полей можно написать:
 
 ```text
-Todo AI Setup x.x.x.exe
+Завтра в 17:00 сходить на курсы, потом час поработать над проектом,
+а каждую пятницу вечером напоминать про уборку.
 ```
 
-## GitHub Releases
+Todo AI поможет превратить это в удобные задачи с датой, временем, длительностью и повторением.
 
-Publishing uses `electron-builder` with the GitHub provider configured in `package.json`:
+---
 
-```json
-{
-  "provider": "github",
-  "owner": "ArturKamnev",
-  "repo": "todo-list"
-}
+## ✨ Возможности
+
+### 📋 Задачи и расписание
+
+- Создание, редактирование и удаление задач
+- Точная дата и время выполнения
+- Длительность задачи
+- Категории / проекты
+- Подзадачи
+- Повторяющиеся задачи
+- Повторение по выбранным дням недели
+- Исключения из повторений
+- Поиск и фильтрация задач
+
+### 🗓 Визуализация дня
+
+Отдельная вкладка показывает день в виде понятной временной шкалы:
+
+```text
+09:00 ┃ Подготовиться к алгебре
+11:30 ┃ Работа над проектом
+13:20 ┃ Сходить на курсы
+18:00 ┃ Тренировка
 ```
 
-Do not hardcode GitHub tokens. Set `GH_TOKEN` in the environment before running the release command.
+Задачи располагаются по времени, а их длительность помогает увидеть загруженность дня.
 
-PowerShell:
+### 🤖 AI-помощник
 
-```powershell
-$env:GH_TOKEN="ghp_your_token_here"
-npm run release
+AI в Todo AI помогает:
+
+- создавать задачи из обычного описания;
+- планировать день;
+- разбивать большие задачи на небольшие шаги;
+- работать с датами, временем и повторениями;
+- формировать более понятное расписание.
+
+Все действия, влияющие на задачи, проходят через интерфейс приложения и могут быть проверены пользователем перед применением.
+
+### 🔔 Уведомления
+
+Todo AI умеет напоминать о запланированных задачах прямо на компьютере.
+
+Доступны напоминания:
+
+- в момент начала задачи;
+- за 5 минут;
+- за 10 минут;
+- за 30 минут;
+- за 1 час.
+
+### 🎨 Интерфейс
+
+- Минималистичный desktop-дизайн
+- Тёмная и светлая тема
+- Русский и английский язык
+- Красивый onboarding при первом запуске
+- Плавные анимации
+- Удобная работа в окне разных размеров
+
+---
+
+## 🧠 Поддерживаемые AI-провайдеры
+
+### Локальные модели — Ollama
+
+Локальный режим позволяет запускать нейросеть прямо на компьютере.
+
+Преимущества:
+
+- задачи остаются на вашем устройстве;
+- API-ключ не требуется;
+- можно выбирать установленные модели;
+- доступны установка и удаление моделей через интерфейс приложения.
+
+> Для локальных моделей производительность зависит от характеристик компьютера и размера выбранной модели.
+
+### Облачные модели — OpenRouter
+
+Облачный режим позволяет использовать AI через API-ключ OpenRouter.
+
+В приложении доступен режим:
+
+```text
+Auto Free Model
 ```
 
-Command Prompt:
+Он автоматически выбирает доступную бесплатную модель OpenRouter.
 
-```cmd
-set GH_TOKEN=ghp_your_token_here
-npm run release
+> [!NOTE]
+> Бесплатные облачные модели могут иметь ограничения по скорости, доступности и количеству запросов.
+
+---
+
+## 🔄 Как работает Todo AI
+
+```mermaid
+flowchart LR
+    User[Пользователь] --> App[Todo AI Interface]
+
+    App --> Tasks[(Задачи и настройки)]
+    App --> Alerts[Уведомления Windows]
+    App --> AI{AI Provider}
+
+    AI --> Local[Ollama<br/>Локальные модели]
+    AI --> Cloud[OpenRouter<br/>Облачные модели]
+
+    Local --> Result[План / задачи / подзадачи]
+    Cloud --> Result
+
+    Result --> Review[Предпросмотр и проверка]
+    Review --> Tasks
 ```
 
-The token needs permission to create and upload GitHub Releases for the repository.
+---
 
-## Publishing A New Version
+## 📥 Как установить приложение
 
-Update the app version, push the commit and tag, then publish:
+### Windows
 
-```powershell
-npm version patch
-git push origin main --follow-tags
-npm run release
+1. Откройте страницу последней версии:
+
+   [Скачать Todo AI](https://github.com/ArturKamnev/todo-list/releases/latest)
+
+2. В разделе **Assets** скачайте файл:
+
+```text
+Todo-AI-Setup-x.x.x.exe
 ```
 
-Users install Todo AI from the Windows installer attached to GitHub Releases. Future releases are discovered through `electron-updater` using the release metadata uploaded by `npm run release`.
+3. Запустите скачанный установщик.
+
+4. После установки откройте **Todo AI**.
+
+5. При первом запуске приложение поможет:
+
+   - выбрать язык;
+   - выбрать тему оформления;
+   - подключить локальный или облачный AI;
+   - выбрать или установить модель;
+   - настроить уведомления.
+
+---
+
+## 🔄 Обновления приложения
+
+Todo AI поддерживает автоматические обновления.
+
+Когда выходит новая версия, приложение может:
+
+- проверить наличие обновления;
+- предложить его скачать;
+- установить обновление после перезапуска.
+
+Проверить обновления вручную можно в настройках приложения:
+
+```text
+Настройки → О приложении → Проверить обновления
+```
+
+---
+
+## 🔐 Приватность
+
+- Задачи и настройки приложения сохраняются локально на компьютере.
+- При использовании **Ollama** AI работает локально на устройстве.
+- При использовании **OpenRouter** запросы отправляются выбранному облачному AI-провайдеру.
+- API-ключ не должен отображаться в интерфейсе или попадать в публичные логи.
+
+---
+
+## 🗺 Что планируется дальше
+
+Todo AI всё ещё развивается. В будущих версиях могут появиться:
+
+- более умное планирование дня;
+- автоматическое перепланирование невыполненных задач;
+- личное расписание свободного времени;
+- быстрый ввод задач через горячую клавишу;
+- улучшенные действия из уведомлений;
+- резервное копирование и импорт задач;
+- расширенная визуализация расписания;
+- недельный обзор продуктивности.
+
+---
+
+## ⚠️ Известные ограничения Beta-версии
+
+На текущем этапе возможны:
+
+- нестабильные ответы некоторых AI-моделей;
+- ограничения бесплатных моделей OpenRouter;
+- изменения интерфейса в новых версиях;
+- отдельные ошибки при нестандартных сценариях использования.
+
+Сообщить о найденной проблеме можно здесь:
+
+[Создать Issue](https://github.com/ArturKamnev/todo-list/issues/new)
+
+---
+
+<div align="center">
+
+## Todo AI 🧪 Beta
+
+Умный desktop-планировщик задач, который постепенно превращается в полноценного AI-помощника для организации дня.
+
+<br />
+
+**Todo AI © 2026**
+
+</div>
