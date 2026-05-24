@@ -1,17 +1,18 @@
 import { CalendarDays } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useI18n } from "../i18n";
-import type { Project, Task } from "../types";
+import type { Project, Task, TimeFormat } from "../types";
 import { compareScheduledAt, formatScheduleLabel, getRelativeDateLabel, getScheduleDate, getTodayISO, getTomorrowISO } from "../utils/date";
 
 interface CalendarViewProps {
   tasks: Task[];
   projects: Project[];
+  timeFormat: TimeFormat;
 }
 
 type CalendarTab = "today" | "tomorrow" | "week" | "upcoming";
 
-export function CalendarView({ tasks, projects }: CalendarViewProps) {
+export function CalendarView({ tasks, projects, timeFormat }: CalendarViewProps) {
   const { language, t } = useI18n();
   const [activeTab, setActiveTab] = useState<CalendarTab>("today");
   const scheduleLabels = { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") };
@@ -49,7 +50,7 @@ export function CalendarView({ tasks, projects }: CalendarViewProps) {
             <div className="timeline-day__date">
               <CalendarDays size={17} />
               <span>{getRelativeDateLabel(date, scheduleLabels, language)}</span>
-              <strong>{formatScheduleLabel(date, scheduleLabels, language)}</strong>
+              <strong>{formatScheduleLabel(date, scheduleLabels, language, timeFormat)}</strong>
             </div>
             <div className="timeline-day__tasks">
               {dateTasks.map((task) => {
@@ -60,7 +61,7 @@ export function CalendarView({ tasks, projects }: CalendarViewProps) {
                     <div>
                       <h3>{task.title}</h3>
                       <p>
-                        {formatScheduleLabel(task.scheduledAt, scheduleLabels, language)}
+                        {formatScheduleLabel(task.scheduledAt, scheduleLabels, language, timeFormat)}
                         {" · "}
                         {project?.name ?? t("task.project")}
                       </p>

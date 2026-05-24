@@ -169,13 +169,14 @@ export function AIAssistantPanel({
   };
 
   async function sendMessage(content: string) {
-    const trimmed = content.trim();
-    if (!trimmed || isThinking) return;
+    const hasText = content.trim();
+    if (!hasText || isThinking) return;
+    const originalContent = content;
 
     const userMessage: AssistantMessage = {
       id: `message-${Date.now()}-user`,
       role: "user",
-      content: trimmed,
+      content: originalContent,
       createdAt: new Date().toISOString(),
     };
     const nextMessages = [...messages, userMessage];
@@ -186,7 +187,7 @@ export function AIAssistantPanel({
     setIsThinking(true);
 
     try {
-      const result = await chatWithAssistant(trimmed, tasks, settings, activeTool);
+      const result = await chatWithAssistant(originalContent, tasks, settings, activeTool);
       if (result.action) {
         setPendingAction(result.action);
       }
@@ -199,7 +200,7 @@ export function AIAssistantPanel({
         model: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
         message: aiError,
       });
-      setPendingRetry(trimmed);
+      setPendingRetry(originalContent);
       setMessages([
         ...nextMessages,
         {
@@ -209,7 +210,7 @@ export function AIAssistantPanel({
           createdAt: new Date().toISOString(),
           metadata: {
             errorCode: error instanceof AIProviderError ? error.code : "unknown",
-            retryPrompt: trimmed,
+            retryPrompt: originalContent,
           },
         },
       ]);
@@ -323,7 +324,7 @@ export function AIAssistantPanel({
                   <article className="assistant-task-preview__card" key={`${task.title}-${index}`} style={{ "--index": index } as React.CSSProperties}>
                     <strong>{task.title}</strong>
                     {task.description ? <p>{task.description}</p> : null}
-                    <span>{formatScheduleLabel(task.scheduledAt ?? null, scheduleLabels, language)}</span>
+                    <span>{formatScheduleLabel(task.scheduledAt ?? null, scheduleLabels, language, settings.timeFormat)}</span>
                     {task.durationMinutes ? <span>{task.durationMinutes} min</span> : null}
                     {task.reminderMinutes !== null && task.reminderMinutes !== undefined ? <span>{formatReminder(task.reminderMinutes, t)}</span> : null}
                     {task.projectName ? <span>{task.projectName}</span> : null}
@@ -356,7 +357,7 @@ export function AIAssistantPanel({
                   return (
                     <article className="assistant-task-preview__card" key={`${change.taskId}-${change.scheduledAt}`} style={{ "--index": index } as React.CSSProperties}>
                       <strong>{task?.title ?? change.taskId}</strong>
-                      <span>{formatScheduleLabel(change.scheduledAt, scheduleLabels, language)}</span>
+                      <span>{formatScheduleLabel(change.scheduledAt, scheduleLabels, language, settings.timeFormat)}</span>
                       <span>{change.durationMinutes ?? task?.durationMinutes ?? 30} min</span>
                       {change.reason ? <p>{change.reason}</p> : null}
                     </article>
@@ -523,6 +524,7 @@ export function AIAssistantPanel({
                       <div className="composer-model-dropdown__group-title">
                         {t("assistant.model.cloudModels")}
                       </div>
+                      <p className="composer-model-dropdown__note">{t("settings.openRouterFreeModelNote")}</p>
                       
                       {openRouterModelOptions.map((option) => {
                         const isActive = settings.aiProvider === "openrouter" && settings.cloudModel === option.id;
@@ -576,6 +578,11 @@ export function AIAssistantPanel({
               </button>
             </div>
           </form>
+          <p className="composer-disclaimer">
+            {language === "ru"
+              ? "ИИ может допускать ошибки, так как приложение находится в бета-тестировании."
+              : "AI can make mistakes while the app is in beta testing."}
+          </p>
         </div>
 
         <div className="assistant-empty-spacer assistant-empty-spacer--bottom" />

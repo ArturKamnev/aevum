@@ -73,6 +73,8 @@ interface PullProgressPayload {
 interface OpenRouterChatRequest {
   messages: Array<{ role: OpenRouterRole; content: string }>;
   model: string;
+  json: boolean;
+  mode?: string;
 }
 
 interface NotificationTaskPayload {
@@ -524,9 +526,12 @@ async function chatOpenRouter(payload: unknown, isTest = false) {
 }
 
 async function sendOpenRouterChat(apiKey: string, request: OpenRouterChatRequest, isTest: boolean) {
+  const useJsonResponseFormat = shouldUseOpenRouterResponseFormat(request, isTest);
   logOpenRouterDebug("Sending OpenRouter chat request", {
     provider: "openrouter",
-    model: request.model,
+    requestedModel: request.model,
+    mode: request.mode ?? (isTest ? "connection-test" : "chat"),
+    responseFormat: useJsonResponseFormat ? "json_object" : "text",
     requestType: isTest ? "connection-test" : "chat",
   });
 
@@ -542,12 +547,14 @@ async function sendOpenRouterChat(apiKey: string, request: OpenRouterChatRequest
       model: request.model,
       messages: request.messages,
       stream: false,
+      ...(useJsonResponseFormat ? { response_format: { type: "json_object" } } : {}),
     }),
   });
 
   logOpenRouterDebug("OpenRouter HTTP response", {
     provider: "openrouter",
-    model: request.model,
+    requestedModel: request.model,
+    mode: request.mode ?? (isTest ? "connection-test" : "chat"),
     httpStatus: response.status,
   });
 
@@ -557,7 +564,8 @@ async function sendOpenRouterChat(apiKey: string, request: OpenRouterChatRequest
     const status = mapOpenRouterHttpStatus(response.status);
     logOpenRouterDebug("OpenRouter error response", {
       provider: "openrouter",
-      model: request.model,
+      requestedModel: request.model,
+      mode: request.mode ?? (isTest ? "connection-test" : "chat"),
       httpStatus: response.status,
       sanitizedErrorBody: sanitizeProviderBody(bodyText),
     });
@@ -566,11 +574,14 @@ async function sendOpenRouterChat(apiKey: string, request: OpenRouterChatRequest
 
   const data = parseJsonSafely(bodyText);
   const content = readOpenRouterContent(data);
+  const actualModel = readOpenRouterActualModel(data) ?? request.model;
   logOpenRouterDebug("OpenRouter assistant content", {
     provider: "openrouter",
-    model: request.model,
+    requestedModel: request.model,
+    actualModel,
+    mode: request.mode ?? (isTest ? "connection-test" : "chat"),
     httpStatus: response.status,
-    rawAssistantContent: content,
+    sanitizedRawAssistantContent: sanitizeProviderBody(content),
   });
   if (!content) {
     return {
@@ -578,10 +589,17 @@ async function sendOpenRouterChat(apiKey: string, request: OpenRouterChatRequest
       status: "unexpected-response" satisfies OpenRouterStatus,
       httpStatus: response.status,
       message: "OpenRouter returned a valid response, but no assistant text was found.",
-      model: request.model,
+      model: actualModel,
+      requestedModel: request.model,
+      actualModel,
     };
   }
-  return { ok: true, status: "connected" satisfies OpenRouterStatus, model: request.model, content, httpStatus: response.status };
+  return { ok: true, status: "connected" satisfies OpenRouterStatus, model: actualModel, requestedModel: request.model, actualModel, content, httpStatus: response.status };
+}
+
+function shouldUseOpenRouterResponseFormat(request: OpenRouterChatRequest, isTest: boolean) {
+  if (!request.json || isTest) return false;
+  return request.model !== defaultOpenRouterModel;
 }
 
 function readOpenRouterRequest(value: unknown): OpenRouterChatRequest | null {
@@ -589,11 +607,16 @@ function readOpenRouterRequest(value: unknown): OpenRouterChatRequest | null {
   const messages = value.messages
     .map((message) => {
       if (!isRecord(message) || (message.role !== "system" && message.role !== "user" && message.role !== "assistant") || typeof message.content !== "string") return null;
-      return { role: message.role, content: message.content.slice(0, 12000) };
+      return { role: message.role, content: message.content };
     })
     .filter((message): message is { role: "system" | "user" | "assistant"; content: string } => Boolean(message));
   if (!messages.length) return null;
-  return { messages, model: readOpenRouterModel(value.model) };
+  return {
+    messages,
+    model: readOpenRouterModel(value.model),
+    json: value.json === true,
+    mode: typeof value.mode === "string" ? value.mode.slice(0, 40) : undefined,
+  };
 }
 
 function readOpenRouterModel(value: unknown) {
@@ -605,6 +628,10 @@ function readOpenRouterContent(value: unknown) {
   const choice = value.choices[0];
   if (!isRecord(choice) || !isRecord(choice.message) || typeof choice.message.content !== "string") return "";
   return choice.message.content.trim();
+}
+
+function readOpenRouterActualModel(value: unknown) {
+  return isRecord(value) && typeof value.model === "string" && value.model.trim() ? value.model.trim() : null;
 }
 
 function mapOpenRouterHttpStatus(status: number): OpenRouterStatus {

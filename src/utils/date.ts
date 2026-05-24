@@ -1,4 +1,4 @@
-import type { Language } from "../types";
+import type { Language, TimeFormat } from "../types";
 
 const dateFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
@@ -83,12 +83,26 @@ export function formatScheduleLabel(
   value: string | null | undefined,
   labels: { noDate: string; overdue: string; today: string; tomorrow: string },
   language: Language = "en",
+  timeFormat: TimeFormat = "24h",
 ) {
   if (!value) return labels.noDate;
   const date = getScheduleDate(value);
   const time = getScheduleTime(value);
   const relative = getRelativeDateLabel(value, labels, language);
-  return time ? `${relative}, ${time}` : relative;
+  return time ? `${relative}, ${formatTime(time, timeFormat)}` : relative;
+}
+
+export function formatTime(value: string | null | undefined, timeFormat: TimeFormat = "24h") {
+  const time = value?.includes("T") ? getScheduleTime(value) : value ?? "";
+  if (!time) return "";
+  const [hoursValue, minutesValue] = time.split(":").map(Number);
+  if (!Number.isFinite(hoursValue) || !Number.isFinite(minutesValue)) return time;
+  if (timeFormat === "24h") {
+    return `${String(hoursValue).padStart(2, "0")}:${String(minutesValue).padStart(2, "0")}`;
+  }
+  const period = hoursValue >= 12 ? "PM" : "AM";
+  const hours = hoursValue % 12 || 12;
+  return `${hours}:${String(minutesValue).padStart(2, "0")} ${period}`;
 }
 
 export function getRelativeDateLabel(

@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { EmptyState } from "./EmptyState";
 import { TaskCard } from "./TaskCard";
 import { useI18n } from "../i18n";
-import type { Project, SortMode, Task, TaskStatus } from "../types";
+import type { Project, SortMode, Task, TaskStatus, TimeFormat } from "../types";
 import { compareScheduledAt } from "../utils/date";
 
 interface TaskListProps {
@@ -23,6 +23,7 @@ interface TaskListProps {
   onToggleSubtask: (taskId: string, subtaskId: string) => void;
   onBreakDownTask?: (task: Task) => Promise<string[]>;
   onEditTask?: (task: Task) => void;
+  timeFormat: TimeFormat;
 }
 
 const statusScore: Record<TaskStatus, number> = { active: 0, completed: 1 };
@@ -72,6 +73,7 @@ export function TaskList(props: TaskListProps) {
   onToggleSubtask,
   onBreakDownTask,
   onEditTask,
+  timeFormat,
   } = props;
 
   const visibleTasks = useMemo(
@@ -132,6 +134,7 @@ export function TaskList(props: TaskListProps) {
               onToggleSubtask={onToggleSubtask}
               onBreakDownTask={onBreakDownTask}
               onEditTask={onEditTask}
+              timeFormat={timeFormat}
             />
           ))
         )}

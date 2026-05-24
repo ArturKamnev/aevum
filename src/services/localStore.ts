@@ -1,6 +1,7 @@
 import { projects as seedProjects } from "../data/sampleData";
 import type { Project, ReminderOffsetMinutes, Task } from "../types";
 import { normalizeScheduledAt } from "../utils/date";
+import { createSubtaskId, createTaskId } from "../utils/id";
 import { calculateNextRepeatAt, migrateLegacyRepeat, normalizeRepeat } from "../utils/recurrence";
 
 const tasksStorageKey = "todo-ai-tasks-v1";
@@ -13,7 +14,10 @@ const uncategorizedProject: Project = {
 };
 
 export function loadTasks() {
-  return loadArray<Task>(tasksStorageKey, migrateTask, () => []);
+  const tasks = loadArray<Task>(tasksStorageKey, migrateTask, () => []);
+  const { tasks: uniqueTasks, changed } = ensureUniqueTaskIds(tasks);
+  if (changed) saveTasks(uniqueTasks);
+  return uniqueTasks;
 }
 
 export function saveTasks(tasks: Task[]) {
@@ -96,6 +100,39 @@ function migrateTask(value: unknown): Task | undefined {
     ...migratedTask,
     nextRepeatAt: migratedTask.nextRepeatAt ?? calculateNextRepeatAt(migratedTask),
   };
+}
+
+function ensureUniqueTaskIds(tasks: Task[]) {
+  let changed = false;
+  const taskIds = new Set<string>();
+  const uniqueTasks = tasks.map((task) => {
+    let nextTask = task;
+    if (taskIds.has(task.id)) {
+      nextTask = { ...nextTask, id: createTaskId(), updatedAt: new Date().toISOString() };
+      changed = true;
+    }
+    taskIds.add(nextTask.id);
+
+    const subtaskIds = new Set<string>();
+    const subtasks = nextTask.subtasks.map((subtask) => {
+      if (subtaskIds.has(subtask.id)) {
+        changed = true;
+        const uniqueSubtask = { ...subtask, id: createSubtaskId() };
+        subtaskIds.add(uniqueSubtask.id);
+        return uniqueSubtask;
+      }
+      subtaskIds.add(subtask.id);
+      return subtask;
+    });
+
+    if (subtasks !== nextTask.subtasks && subtasks.some((subtask, index) => subtask.id !== nextTask.subtasks[index]?.id)) {
+      nextTask = { ...nextTask, subtasks, updatedAt: new Date().toISOString() };
+    }
+
+    return nextTask;
+  });
+
+  return { tasks: uniqueTasks, changed };
 }
 
 function readReminderMinutes(value: unknown): ReminderOffsetMinutes | null {

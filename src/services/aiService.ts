@@ -4,6 +4,7 @@ import { defaultRepeat, normalizeRepeat } from "../utils/recurrence";
 
 export type AIConnectionStatus = "idle" | "connected" | "not-connected" | "model-missing";
 type StructuredSchema = "create_tasks" | "plan_day" | "replan_tasks" | "create_subtasks";
+const dayMinutes = 24 * 60;
 
 export interface AIModelInfo {
   name: string;
@@ -71,6 +72,8 @@ interface SubtasksResult {
   subtasks: string[];
 }
 
+type AIRequestMode = "guide" | "guide_repair" | StructuredSchema | `${StructuredSchema}_repair`;
+
 export class AIProviderError extends Error {
   constructor(
     message: string,
@@ -115,6 +118,14 @@ If the user asks you to create or plan tasks, politely decline and instruct them
 
 User's tasks:
 ${taskSummary || "No tasks yet."}`;
+}
+
+function buildGuideRepairPrompt(taskContext: Task[], language: UserSettings["language"]) {
+  return `${buildGuidePrompt(taskContext, language)}
+
+The previous assistant answer was unusable, malformed, wrong-language, or low quality.
+Rewrite it once. Return plain natural text only, in the UI language only.
+Do not return JSON. Do not create, schedule, update, delete, or imply saved task changes.`;
 }
 
 function authorizeActionResult(
@@ -206,11 +217,7 @@ async function chatWithAssistantInternal(
       };
     }
 
-    const systemPrompt = buildGuidePrompt(taskContext, settings.language);
-    const raw = await requestAIChat(settings, [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ]);
+    const raw = await requestGuideText(userMessage, taskContext, settings);
     return {
       message: createAssistantMessage(raw),
       action: undefined,
@@ -218,11 +225,8 @@ async function chatWithAssistantInternal(
   }
 
   if (mode === "plan_day") {
-    const raw = await requestAIChat(settings, [
-      { role: "system", content: buildPlanPrompt(taskContext, settings.availabilityBlocks, settings.language) },
-      { role: "user", content: userMessage },
-    ], { json: true });
-    const plan = await parseOrRepairStructured(raw, "plan_day", settings, (value) => validatePlanDayResult(value, taskContext, settings.availabilityBlocks));
+    const systemPrompt = buildPlanPrompt(taskContext, settings.availabilityBlocks, settings.language);
+    const plan = await requestStructuredAI(userMessage, systemPrompt, "plan_day", settings, (value) => validatePlanDayResult(value, taskContext, settings.availabilityBlocks, "plan_day", settings.language));
     return {
       message: createAssistantMessage(renderPlanMessage(plan, settings.language)),
       action: plan.action,
@@ -230,22 +234,16 @@ async function chatWithAssistantInternal(
   }
 
   if (mode === "replan_tasks") {
-    const raw = await requestAIChat(settings, [
-      { role: "system", content: buildReplanPrompt(taskContext, settings.availabilityBlocks, settings.language) },
-      { role: "user", content: userMessage },
-    ], { json: true });
-    const plan = await parseOrRepairStructured(raw, "replan_tasks", settings, (value) => validatePlanDayResult(value, taskContext, settings.availabilityBlocks, "replan_tasks"));
+    const systemPrompt = buildReplanPrompt(taskContext, settings.availabilityBlocks, settings.language);
+    const plan = await requestStructuredAI(userMessage, systemPrompt, "replan_tasks", settings, (value) => validatePlanDayResult(value, taskContext, settings.availabilityBlocks, "replan_tasks", settings.language));
     return {
       message: createAssistantMessage(renderPlanMessage(plan, settings.language)),
       action: plan.action,
     };
   }
 
-  const raw = await requestAIChat(settings, [
-    { role: "system", content: buildCreateTasksPrompt(taskContext, settings.language) },
-    { role: "user", content: userMessage },
-  ], { json: true });
-  const action = await parseOrRepairStructured(raw, "create_tasks", settings, validateCreateTasksAction);
+  const systemPrompt = buildCreateTasksPrompt(taskContext, settings.language);
+  const action = await requestStructuredAI(userMessage, systemPrompt, "create_tasks", settings, validateCreateTasksAction);
 
   return {
     message: createAssistantMessage(renderCreateTasksMessage(action.action.tasks.length, settings.language), { actionType: action.action.type }),
@@ -254,12 +252,8 @@ async function chatWithAssistantInternal(
 }
 
 export async function breakDownTaskWithAI(task: Task, settings: UserSettings): Promise<string[]> {
-  const raw = await requestAIChat(settings, [
-    { role: "system", content: buildBreakdownPrompt(task, settings.language) },
-    { role: "user", content: `Break this task into practical subtasks: ${task.title}\n\n${task.description}` },
-  ], { json: true });
-
-  const result = await parseOrRepairStructured(raw, "create_subtasks", settings, validateSubtasksResult);
+  const userMessage = `Break this task into practical subtasks: ${task.title}\n\n${task.description}`;
+  const result = await requestStructuredAI(userMessage, buildBreakdownPrompt(task, settings.language), "create_subtasks", settings, validateSubtasksResult);
   return result.subtasks;
 }
 
@@ -314,7 +308,7 @@ export async function testOllamaConnection(settings: UserSettings): Promise<AICo
 async function requestOllamaChat(
   settings: UserSettings,
   messages: Array<{ role: "system" | "user"; content: string }>,
-  options: { json?: boolean } = {},
+  options: { json?: boolean; mode?: AIRequestMode } = {},
 ) {
   if (settings.aiProvider !== "ollama") {
     throw new AIProviderError("Only Local Ollama is configured in this build.", "provider_not_supported", {
@@ -329,6 +323,7 @@ async function requestOllamaChat(
     model: settings.localModel,
     endpoint,
     format: options.json ? "json" : "text",
+    mode: options.mode,
   });
 
   const response = await fetchWithProviderErrors(endpoint, {
@@ -348,6 +343,7 @@ async function requestOllamaChat(
     model: settings.localModel,
     endpoint,
     status: response.status,
+    mode: options.mode,
   });
 
   if (response.status === 404) {
@@ -382,22 +378,34 @@ async function requestOllamaChat(
   }
 
   const payload = (await response.json()) as unknown;
-  return readOllamaMessage(payload);
+  const content = readOllamaMessage(payload);
+  logAIDebug("Received Ollama assistant content", {
+    provider: "ollama",
+    requestedModel: settings.localModel,
+    actualModel: readOllamaActualModel(payload) ?? settings.localModel,
+    mode: options.mode,
+    status: response.status,
+    sanitizedRawAssistantContent: sanitizeForDevLog(content),
+  });
+  return content;
 }
 
 async function requestAIChat(
   settings: UserSettings,
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-  options: { json?: boolean } = {},
+  options: { json?: boolean; mode?: AIRequestMode } = {},
 ) {
   if (settings.aiProvider === "openrouter") {
-    const result = await window.todoAI?.chatOpenRouter({ messages, model: settings.cloudModel, json: options.json });
+    const result = await window.todoAI?.chatOpenRouter({ messages, model: settings.cloudModel, json: options.json, mode: options.mode });
     if (!result?.ok) throw openRouterError(result);
     if (!result.content) throw new AIProviderError("The AI provider returned an unexpected response.", "unexpected_response");
     logAIDebug("Received OpenRouter assistant content", {
       provider: "openrouter",
-      model: result.model ?? settings.cloudModel,
-      rawAssistantContent: result.content,
+      requestedModel: result.requestedModel ?? settings.cloudModel,
+      actualModel: result.actualModel ?? result.model ?? settings.cloudModel,
+      mode: options.mode,
+      httpStatus: result.httpStatus,
+      sanitizedRawAssistantContent: sanitizeForDevLog(result.content),
     });
     return result.content;
   }
@@ -422,22 +430,57 @@ function openRouterError(result: OpenRouterResult | undefined) {
   return new AIProviderError(result?.message ?? "OpenRouter returned an unexpected response.", "unexpected_response", debug);
 }
 
-async function parseOrRepairStructured<T>(
-  raw: string,
+async function requestGuideText(userMessage: string, taskContext: Task[], settings: UserSettings) {
+  const systemPrompt = buildGuidePrompt(taskContext, settings.language);
+  const raw = await requestAIChat(settings, [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userMessage },
+  ], { mode: "guide" });
+
+  if (isTextQualitySafe(raw, settings.language)) return sanitizeAssistantText(raw, guideFallback(settings.language));
+
+  logInvalidAIResponse(raw, "guide", "initial", settings);
+  const repaired = await requestAIChat(settings, [
+    { role: "system", content: buildGuideRepairPrompt(taskContext, settings.language) },
+    { role: "user", content: userMessage },
+    { role: "assistant", content: raw },
+    { role: "user", content: "Rewrite the previous answer so it is natural, concise, useful, and in the required UI language. Do not return JSON or task mutations." },
+  ], { mode: "guide_repair" });
+
+  if (isTextQualitySafe(repaired, settings.language)) return sanitizeAssistantText(repaired, guideFallback(settings.language));
+
+  logInvalidAIResponse(repaired, "guide", "repair", settings);
+  throw new AIProviderError(retryWithAnotherModelMessage(settings.language), "invalid_ai_response", {
+    mode: "guide",
+  });
+}
+
+async function requestStructuredAI<T>(
+  userMessage: string,
+  systemPrompt: string,
   schema: StructuredSchema,
   settings: UserSettings,
   validate: (value: unknown) => T | undefined,
 ): Promise<T> {
+  const raw = await requestAIChat(settings, [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userMessage },
+  ], { json: true, mode: schema });
   const parsed = parseStructured(raw, validate, schema, settings);
   if (parsed) return parsed;
 
-  logInvalidAIResponse(raw, schema, "initial");
-  const repaired = await repairStructuredResponse(raw, schema, settings);
+  logInvalidAIResponse(raw, schema, "initial", settings);
+  const repaired = await requestAIChat(settings, [
+    { role: "system", content: `${systemPrompt}\n\nCorrection pass: the previous assistant output was invalid, malformed, wrong-language, or unusable. Use the original user request below and return exactly one valid JSON object for the same schema. Do not include markdown, commentary, or raw prose outside JSON.` },
+    { role: "user", content: userMessage },
+    { role: "assistant", content: raw },
+    { role: "user", content: "Repair the response now. Return only valid JSON." },
+  ], { json: true, mode: `${schema}_repair` });
   const repairedParsed = parseStructured(repaired, validate, schema, settings);
   if (repairedParsed) return repairedParsed;
 
-  logInvalidAIResponse(repaired, schema, "repair");
-  throw new AIProviderError("I could not understand the AI response. Please try again.", "invalid_ai_response", {
+  logInvalidAIResponse(repaired, schema, "repair", settings);
+  throw new AIProviderError(retryWithAnotherModelMessage(settings.language), "invalid_ai_response", {
     schema,
   });
 }
@@ -463,13 +506,6 @@ function parseStructured<T>(
     }
   }
   return undefined;
-}
-
-async function repairStructuredResponse(raw: string, schema: StructuredSchema, settings: UserSettings) {
-  return requestAIChat(settings, [
-    { role: "system", content: buildRepairPrompt(schema, settings.language) },
-    { role: "user", content: raw },
-  ], { json: true });
 }
 
 function buildPlanPrompt(taskContext: Task[], availabilityBlocks: AvailabilityBlock[], language: UserSettings["language"]) {
@@ -577,21 +613,6 @@ Task title: ${task.title}
 Task description: ${task.description || "No description."}`;
 }
 
-function buildRepairPrompt(schema: StructuredSchema, language: UserSettings["language"]) {
-  const shape =
-    schema === "create_tasks"
-      ? `{"userMessage":"${copy(language).createTasksUserMessage}","action":{"type":"create_tasks","tasks":[{"title":"Task title","description":"","scheduledAt":null,"durationMinutes":null,"reminderMinutes":null,"repeat":{"enabled":false,"type":"daily","interval":1,"unit":"day","weekdays":[],"excludedWeekdays":[]},"projectName":"Personal","tags":[]}]}}`
-      : schema === "plan_day" || schema === "replan_tasks"
-        ? `{"userMessage":"${copy(language).planUserMessage}","plan":[{"time":"09:00","title":"Plan item","description":"What to do."}],"action":{"type":"schedule_tasks","mode":"${schema}","changes":[{"taskId":"existing-task-id","scheduledAt":"2026-05-22T09:00","durationMinutes":30,"reason":"Fits available time."}]}}`
-        : `{"userMessage":"${copy(language).subtasksUserMessage}","subtasks":["First step","Second step","Third step"]}`;
-
-  return `Convert the user's content into valid JSON for Aevum.
-${languageInstruction(language)}
-Return only one JSON object. No markdown fences. No commentary.
-Required schema:
-${shape}`;
-}
-
 function baseStructuredPrompt(taskContext: Task[], availabilityBlocks: AvailabilityBlock[], language: UserSettings["language"]) {
   const taskSummary = taskContext
     .slice(0, 20)
@@ -641,21 +662,31 @@ async function fetchWithProviderErrors(endpoint: string, init: RequestInit, sett
 function validateCreateTasksAction(value: unknown): { userMessage: string; action: CreateTasksAction } | undefined {
   if (!isRecord(value)) return undefined;
   const userMessage = readUserMessage(value) || "Review these tasks before creating them.";
+  if (!isTaskDraftTextSafe(userMessage)) return undefined;
   const action = isRecord(value.action) ? value.action : value;
   if (action.type !== "create_tasks" || !Array.isArray(action.tasks)) return undefined;
   const tasks = action.tasks.map(readTaskDraft).filter((task): task is AITaskDraft => Boolean(task));
   return tasks.length > 0 ? { userMessage, action: { type: "create_tasks", tasks } } : undefined;
 }
 
-function validatePlanDayResult(value: unknown, taskContext: Task[], availabilityBlocks: AvailabilityBlock[], mode: "plan_day" | "replan_tasks" = "plan_day"): PlanDayResult | undefined {
+function validatePlanDayResult(
+  value: unknown,
+  taskContext: Task[],
+  availabilityBlocks: AvailabilityBlock[],
+  mode: "plan_day" | "replan_tasks" = "plan_day",
+  language: UserSettings["language"] = "en",
+): PlanDayResult | undefined {
   if (!isRecord(value)) return undefined;
   const planSource = Array.isArray(value.plan) ? value.plan : Array.isArray(value.blocks) ? value.blocks : Array.isArray(value.schedule) ? value.schedule : undefined;
   if (!planSource) return undefined;
   const plan = planSource.map(readPlanBlock).filter((block): block is PlanBlock => Boolean(block)).slice(0, 8);
   if (plan.length === 0) return undefined;
+  const userMessage = readUserMessage(value) || copy(language).planUserMessage;
+  if (!isTextQualitySafe(userMessage, language)) return undefined;
+  if (!plan.every((block) => isTextQualitySafe(block.title, language) && (!block.description || isTextQualitySafe(block.description, language)))) return undefined;
   const action = readScheduleAction(value.action, taskContext, availabilityBlocks, mode);
   return {
-    userMessage: readUserMessage(value) || "Here is a practical plan for your day.",
+    userMessage,
     plan,
     action,
   };
@@ -667,20 +698,26 @@ function validateSubtasksResult(value: unknown): SubtasksResult | undefined {
   if (!rawSubtasks) return undefined;
   const subtasks = rawSubtasks
     .map(readSubtaskTitle)
+    .filter(isTaskDraftTextSafe)
     .filter((title): title is string => Boolean(title))
     .slice(0, 7);
-  return subtasks.length >= 3
-    ? { userMessage: readUserMessage(value) || "Here is a smaller checklist.", subtasks }
+  const userMessage = readUserMessage(value) || "Here is a smaller checklist.";
+  return subtasks.length >= 3 && isTaskDraftTextSafe(userMessage)
+    ? { userMessage, subtasks }
     : undefined;
 }
 
 function readTaskDraft(value: unknown): AITaskDraft | undefined {
   if (!isRecord(value) || typeof value.title !== "string" || value.title.trim().length === 0) return undefined;
+  if (!isTaskDraftTextSafe(value.title)) return undefined;
+  if (typeof value.description === "string" && value.description.trim() && !isTaskDraftTextSafe(value.description)) return undefined;
   const scheduleValue = readScheduleValue(value);
+  const scheduledAt = normalizeScheduledAt(scheduleValue);
+  if (scheduledAt && !isReasonableScheduleDate(scheduledAt)) return undefined;
   return {
     title: value.title.trim(),
     description: typeof value.description === "string" ? value.description.trim() : "",
-    scheduledAt: normalizeScheduledAt(scheduleValue),
+    scheduledAt,
     durationMinutes: readDurationMinutes(value.durationMinutes),
     reminderMinutes: readReminderMinutes(value.reminderMinutes),
     repeat: isRecord(value.repeat) ? normalizeRepeat(value.repeat) : { ...defaultRepeat },
@@ -704,6 +741,7 @@ function readScheduleChange(value: unknown, tasks: Task[], mode: "plan_day" | "r
   if (!task || !isEligibleForPlan(task, mode)) return undefined;
   const scheduledAt = normalizeScheduledAt(typeof value.scheduledAt === "string" ? value.scheduledAt : null);
   if (!scheduledAt || !getScheduleTime(scheduledAt)) return undefined;
+  if (!isReasonableScheduleDate(scheduledAt)) return undefined;
   return {
     taskId: task.id,
     scheduledAt,
@@ -807,9 +845,69 @@ function sanitizeAssistantText(value: string, fallback: string) {
   return trimmed.length > 240 ? `${trimmed.slice(0, 237).trim()}...` : trimmed;
 }
 
+function guideFallback(language: UserSettings["language"]) {
+  return language === "ru"
+    ? "\u042f \u043c\u043e\u0433\u0443 \u043f\u043e\u043c\u043e\u0447\u044c \u0441 \u043d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u0435\u0439 \u043f\u043e Aevum \u0438 \u043e\u0431\u044a\u044f\u0441\u043d\u0438\u0442\u044c \u0444\u0443\u043d\u043a\u0446\u0438\u0438 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u044f."
+    : "I can help with Aevum navigation and explain how the app works.";
+}
+
+function retryWithAnotherModelMessage(language: UserSettings["language"]) {
+  return language === "ru"
+    ? "\u041e\u0442\u0432\u0435\u0442 \u043c\u043e\u0434\u0435\u043b\u0438 \u0432\u044b\u0433\u043b\u044f\u0434\u0435\u043b \u043d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0435 \u0440\u0430\u0437 \u0438\u043b\u0438 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u0443\u044e AI-\u043c\u043e\u0434\u0435\u043b\u044c \u0432 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430\u0445."
+    : "The model response looked unusable. Try again or choose another AI model in settings.";
+}
+
+function isTextQualitySafe(value: string, language: UserSettings["language"]) {
+  if (!isTaskDraftTextSafe(value)) return false;
+  const text = value.trim();
+  const cyrillic = (text.match(/[А-Яа-яЁё]/g) ?? []).length;
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const alphabetic = cyrillic + latin;
+  if (alphabetic < 8) return true;
+  if (language === "ru") return cyrillic >= latin || cyrillic / alphabetic >= 0.35;
+  return latin >= cyrillic || latin / alphabetic >= 0.65;
+}
+
+function isTaskDraftTextSafe(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const text = value.trim();
+  if (!text || text.length > 800) return false;
+  if (/[{}\[\]]/.test(text)) return false;
+  if (hasCjkCharacters(text)) return false;
+  if (/[�]/u.test(text)) return false;
+  if (/[\u00C2\u00D0\u00D1][\u0080-\u00BF]/u.test(text)) return false;
+  if (/(.)\1{9,}/u.test(text)) return false;
+  if (/[!?.,:;]{7,}/u.test(text)) return false;
+  const lower = text.toLowerCase();
+  if (lower === "undefined" || lower === "null") return false;
+  const knownBadPatterns = [
+    /понедеть/u,
+    /заботиться\s+о\s+игре/u,
+    /план\s+на\s+день\s+план\s+на\s+день\s+план/u,
+  ];
+  if (knownBadPatterns.some((pattern) => pattern.test(lower))) return false;
+  const words = lower.match(/[a-zа-яё]{3,}/gu) ?? [];
+  if (words.length >= 6) {
+    const unique = new Set(words);
+    if (unique.size <= Math.ceil(words.length / 4)) return false;
+  }
+  return true;
+}
+
+function isReasonableScheduleDate(value: string) {
+  const scheduleDate = getScheduleDate(value);
+  if (!scheduleDate) return false;
+  const date = new Date(`${scheduleDate}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return false;
+  const currentYear = new Date().getFullYear();
+  const year = date.getFullYear();
+  return year >= currentYear - 1 && year <= currentYear + 10;
+}
+
 function readDurationMinutes(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
-  return Math.floor(value);
+  const minutes = Math.floor(value);
+  return minutes <= dayMinutes ? minutes : null;
 }
 
 function readReminderMinutes(value: unknown): ReminderOffsetMinutes | null {
@@ -844,6 +942,10 @@ function readOllamaMessage(payload: unknown) {
   }
 
   throw new AIProviderError("The AI provider returned an unexpected response.", "unexpected_response");
+}
+
+function readOllamaActualModel(payload: unknown) {
+  return isRecord(payload) && typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : null;
 }
 
 function readOllamaModels(payload: unknown): AIModelInfo[] {
@@ -948,8 +1050,8 @@ function modelMatches(installedModel: string, selectedModel: string) {
 
 function isLanguageSafeStructured(value: unknown, schema: StructuredSchema, _language: UserSettings["language"]) {
   if (hasCjkCharacters(JSON.stringify(value))) return false;
-  if (schema === "plan_day" && isRecord(value)) {
-    return typeof value.userMessage !== "string" || !hasCjkCharacters(value.userMessage);
+  if ((schema === "plan_day" || schema === "replan_tasks" || schema === "create_tasks") && isRecord(value)) {
+    return typeof value.userMessage !== "string" || isTaskDraftTextSafe(value.userMessage);
   }
   return true;
 }
@@ -1005,9 +1107,23 @@ function logAIError(error: AIProviderError) {
   }
 }
 
-function logInvalidAIResponse(rawResponse: string, schema: StructuredSchema, phase: "initial" | "repair") {
+function sanitizeForDevLog(value: string) {
+  const sanitized = value
+    .replace(/sk-or-v1-[A-Za-z0-9_-]+/g, "sk-or-v1-[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return sanitized.length > 800 ? `${sanitized.slice(0, 797)}...` : sanitized;
+}
+
+function logInvalidAIResponse(rawResponse: string, schema: StructuredSchema | "guide", phase: "initial" | "repair", settings: UserSettings) {
   if (import.meta.env.DEV) {
-    console.error("[Aevum] Invalid AI response", { schema, phase, rawResponse });
+    console.error("[Aevum] Invalid AI response", {
+      provider: settings.aiProvider,
+      requestedModel: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
+      schema,
+      phase,
+      sanitizedRawAssistantContent: sanitizeForDevLog(rawResponse),
+    });
   }
 }
 
@@ -1015,10 +1131,10 @@ function logSchemaValidationError(schema: StructuredSchema, validationError: str
   if (import.meta.env.DEV) {
     console.error("[Aevum] Schema validation error", {
       provider: settings.aiProvider,
-      model: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
+      requestedModel: settings.aiProvider === "openrouter" ? settings.cloudModel : settings.localModel,
       schema,
       validationError,
-      rawAssistantContent,
+      sanitizedRawAssistantContent: sanitizeForDevLog(rawAssistantContent),
     });
   }
 }

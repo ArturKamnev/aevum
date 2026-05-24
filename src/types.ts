@@ -13,6 +13,7 @@ export type RepeatType = "daily" | "weekly" | "monthly" | "custom";
 export type RepeatUnit = "day" | "week" | "month";
 export type SortMode = "deadline" | "status";
 export type ThemeMode = "dark" | "light" | "system";
+export type TimeFormat = "24h" | "12h";
 export type AIProvider = "ollama" | "openrouter";
 export type Language = "en" | "ru";
 export type AIMode = "plan_day" | "create_tasks" | "replan_tasks";
@@ -95,6 +96,7 @@ export interface AssistantMessage {
 
 export interface UserSettings {
   theme: ThemeMode;
+  timeFormat: TimeFormat;
   language: Language;
   aiProvider: AIProvider;
   aiBaseUrl: string;

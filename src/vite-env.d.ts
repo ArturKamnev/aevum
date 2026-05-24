@@ -75,6 +75,7 @@ type OpenRouterRequest = {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   model: string;
   json?: boolean;
+  mode?: string;
 };
 
 type OpenRouterResult = {
@@ -82,6 +83,8 @@ type OpenRouterResult = {
   status: "connected" | "missing-key" | "invalid-key" | "billing-issue" | "model-unavailable" | "rate-limited" | "provider-unavailable" | "offline" | "provider-error" | "unexpected-response" | "invalid" | "invalid-request";
   content?: string;
   model?: string;
+  requestedModel?: string;
+  actualModel?: string;
   message?: string;
   httpStatus?: number;
 };

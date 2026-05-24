@@ -3,8 +3,9 @@ import { useState } from "react";
 import { ProjectBadge } from "./Badges";
 import { useI18n } from "../i18n";
 import { AIProviderError } from "../services/aiService";
-import type { Project, Subtask, Task } from "../types";
+import type { Project, Subtask, Task, TimeFormat } from "../types";
 import { formatScheduleLabel } from "../utils/date";
+import { createSubtaskId } from "../utils/id";
 import { describeRepeat } from "../utils/recurrence";
 
 interface TaskCardProps {
@@ -16,6 +17,7 @@ interface TaskCardProps {
   onToggleSubtask: (taskId: string, subtaskId: string) => void;
   onBreakDownTask?: (task: Task) => Promise<string[]>;
   onEditTask?: (task: Task) => void;
+  timeFormat: TimeFormat;
 }
 
 export function TaskCard({
@@ -27,6 +29,7 @@ export function TaskCard({
   onToggleSubtask,
   onBreakDownTask,
   onEditTask,
+  timeFormat,
 }: TaskCardProps) {
   const { language, t } = useI18n();
   const [isEditing, setIsEditing] = useState(false);
@@ -71,7 +74,7 @@ export function TaskCard({
   function applySubtaskPreview() {
     try {
       const newSubtasks: Subtask[] = subtaskPreview.map((title) => ({
-        id: `subtask-${Date.now()}-${crypto.randomUUID()}`,
+        id: createSubtaskId(),
         title,
         completed: false,
       }));
@@ -150,6 +153,7 @@ export function TaskCard({
               task.scheduledAt,
               { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") },
               language,
+              timeFormat,
             )}
           </span>
           <ProjectBadge project={project} />

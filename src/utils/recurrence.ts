@@ -1,5 +1,6 @@
 import type { RepeatRule, RepeatType, RepeatUnit, Task } from "../types";
 import { getScheduleDate, getScheduleTime, normalizeScheduledAt, toDateInputValue } from "./date";
+import { createSubtaskId, createTaskId } from "./id";
 
 export const defaultRepeat: RepeatRule = {
   enabled: false,
@@ -68,12 +69,12 @@ export function createNextRecurringTask(task: Task, now = new Date().toISOString
 
   const nextTask: Task = {
     ...task,
-    id: `task-${Date.now()}-${crypto.randomUUID()}`,
+    id: createTaskId(),
     status: "active",
     scheduledAt: nextRepeatAt,
     nextRepeatAt: calculateNextRepeatAt({ ...task, scheduledAt: nextRepeatAt }),
     recurringParentId: task.recurringParentId ?? task.id,
-    subtasks: task.subtasks.map((subtask) => ({ ...subtask, id: `subtask-${crypto.randomUUID()}`, completed: false })),
+    subtasks: task.subtasks.map((subtask) => ({ ...subtask, id: createSubtaskId(), completed: false })),
     createdAt: now,
     updatedAt: now,
   };

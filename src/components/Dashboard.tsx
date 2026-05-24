@@ -4,7 +4,7 @@ import { LoadingSkeleton } from "./LoadingSkeleton";
 import { QuickAddTask } from "./QuickAddTask";
 import { TaskCard } from "./TaskCard";
 import { useI18n } from "../i18n";
-import type { Project, Task, TaskDraft } from "../types";
+import type { Project, Task, TaskDraft, TimeFormat } from "../types";
 import { compareScheduledAt, formatScheduleLabel, isScheduledAfterToday, isScheduledBeforeToday, isScheduledToday } from "../utils/date";
 
 interface DashboardProps {
@@ -18,11 +18,12 @@ interface DashboardProps {
   onToggleSubtask: (taskId: string, subtaskId: string) => void;
   onBreakDownTask?: (task: Task) => Promise<string[]>;
   onEditTask?: (task: Task) => void;
+  timeFormat: TimeFormat;
 }
 
 export function Dashboard(props: DashboardProps) {
-  const { t } = useI18n();
-  const { tasks, projects, isLoading, onAddTask, onToggleTask, onDeleteTask, onUpdateTask, onToggleSubtask, onBreakDownTask, onEditTask } = props;
+  const { language, t } = useI18n();
+  const { tasks, projects, isLoading, onAddTask, onToggleTask, onDeleteTask, onUpdateTask, onToggleSubtask, onBreakDownTask, onEditTask, timeFormat } = props;
   const activeTasks = tasks.filter((task) => task.status === "active");
   const todaysTasks = activeTasks.filter((task) => isScheduledToday(task.scheduledAt)).sort((a, b) => compareScheduledAt(a.scheduledAt, b.scheduledAt));
   const overdueTasks = activeTasks.filter((task) => isScheduledBeforeToday(task.scheduledAt));
@@ -68,6 +69,7 @@ export function Dashboard(props: DashboardProps) {
                 onToggleSubtask={onToggleSubtask}
                 onBreakDownTask={onBreakDownTask}
                 onEditTask={onEditTask}
+                timeFormat={timeFormat}
               />
             ))}
           </div>
@@ -93,6 +95,8 @@ export function Dashboard(props: DashboardProps) {
                   {formatScheduleLabel(
                     task.scheduledAt,
                     { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") },
+                    language,
+                    timeFormat,
                   )}
                 </span>
               </div>
@@ -120,6 +124,8 @@ export function Dashboard(props: DashboardProps) {
                   {formatScheduleLabel(
                     task.scheduledAt,
                     { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") },
+                    language,
+                    timeFormat,
                   )}
                 </span>
               </div>

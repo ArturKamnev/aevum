@@ -18,10 +18,12 @@ import { breakDownTaskWithAI } from "./services/aiService";
 import { loadProjects, loadTasks, saveProjects, saveTasks } from "./services/localStore";
 import type { AssistantMessage, Project, SortMode, Task, TaskDraft, TaskStatus, UserSettings, ViewId } from "./types";
 import { isScheduledAfterToday, isScheduledBeforeToday, isScheduledToday } from "./utils/date";
+import { createProjectId, createTaskId } from "./utils/id";
 import { calculateNextRepeatAt, createNextRecurringTask } from "./utils/recurrence";
 
 const defaultSettings: UserSettings = {
   theme: "dark",
+  timeFormat: "24h",
   language: "en",
   aiProvider: "ollama",
   aiBaseUrl: "http://localhost:11434",
@@ -128,7 +130,7 @@ export function App() {
     const now = new Date().toISOString();
     const newTask: Task = {
       ...task,
-      id: `task-${Date.now()}`,
+      id: createTaskId(),
       nextRepeatAt: task.nextRepeatAt ?? calculateNextRepeatAt(task),
       createdAt: now,
       updatedAt: now,
@@ -140,7 +142,7 @@ export function App() {
   const addProject = useCallback((project: Omit<Project, "id">) => {
     const newProject = {
       ...project,
-      id: `project-${Date.now()}`,
+      id: createProjectId(),
     };
     setAppProjects((currentProjects) => [...currentProjects, newProject]);
     return newProject;
@@ -286,6 +288,7 @@ export function App() {
           <Dashboard
             tasks={tasks}
             projects={appProjects}
+            timeFormat={settings.timeFormat}
             isLoading={isLoading}
             onAddTask={addTask}
             onToggleTask={toggleTask}
@@ -297,7 +300,7 @@ export function App() {
           />
         )}
 
-        {(activeView === "today" || activeView === "upcoming") && <TaskList tasks={scopedTasks} {...taskListProps} />}
+        {(activeView === "today" || activeView === "upcoming") && <TaskList tasks={scopedTasks} timeFormat={settings.timeFormat} {...taskListProps} />}
 
         {activeView === "projects" && (
           <ProjectsView
@@ -310,9 +313,9 @@ export function App() {
           />
         )}
 
-        {activeView === "calendar" && <CalendarView tasks={tasks} projects={appProjects} />}
+        {activeView === "calendar" && <CalendarView tasks={tasks} projects={appProjects} timeFormat={settings.timeFormat} />}
 
-        {activeView === "visualization" && <VisualizationView tasks={tasks} projects={appProjects} />}
+        {activeView === "visualization" && <VisualizationView tasks={tasks} projects={appProjects} timeFormat={settings.timeFormat} />}
 
         {activeView === "assistant" && (
           <AIAssistantPanel

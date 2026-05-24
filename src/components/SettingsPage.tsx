@@ -4,6 +4,7 @@ import {
   CalendarClock,
   Check,
   CheckCircle2,
+  Clock3,
   Cpu,
   Database,
   Download,
@@ -23,7 +24,8 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
-import type { AvailabilityBlock, AIProvider, Language, ReminderOffsetMinutes, ThemeMode, UserSettings } from "../types";
+import type { AvailabilityBlock, AIProvider, Language, ReminderOffsetMinutes, ThemeMode, TimeFormat, UserSettings } from "../types";
+import { createAvailabilityId } from "../utils/id";
 
 interface SettingsPageProps {
   clearAiHistory: () => void;
@@ -286,7 +288,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
     const label = scheduleDraft.label.trim() || t("settings.unavailable");
     if (!scheduleDraft.weekdays.length || scheduleDraft.startTime >= scheduleDraft.endTime) return;
     const block: AvailabilityBlock = {
-      id: `availability-${Date.now()}`,
+      id: createAvailabilityId(),
       label,
       weekdays: scheduleDraft.weekdays,
       startTime: scheduleDraft.startTime,
@@ -417,6 +419,26 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             );
           })}
         </fieldset>
+      </SettingsSection>
+
+      <SettingsSection icon={Clock3} title={t("settings.timeFormat")} description={t("settings.timeFormatDescription")}>
+        <div className="segmented-control">
+          {[
+            { value: "24h", label: t("settings.timeFormat24"), meta: "18:30" },
+            { value: "12h", label: t("settings.timeFormat12"), meta: "6:30 PM" },
+          ].map((option) => (
+            <button
+              className={settings.timeFormat === option.value ? "segmented-control__item segmented-control__item--active" : "segmented-control__item"}
+              key={option.value}
+              onClick={() => updateSettings({ timeFormat: option.value as TimeFormat })}
+              type="button"
+            >
+              <Clock3 size={15} />
+              <span>{option.label}</span>
+              <small>{option.meta}</small>
+            </button>
+          ))}
+        </div>
       </SettingsSection>
 
       <SettingsSection icon={Cpu} title={t("settings.aiModels")} description={t("settings.aiSetupDescription")}>
