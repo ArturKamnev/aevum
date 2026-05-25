@@ -5,7 +5,6 @@ import { AppShell } from "./components/AppShell";
 import { CalendarView } from "./components/CalendarView";
 import { CommandPalette } from "./components/CommandPalette";
 import { Dashboard } from "./components/Dashboard";
-import { EmptyState } from "./components/EmptyState";
 import { SettingsPage } from "./components/SettingsPage";
 import { OnboardingFlow } from "./components/OnboardingFlow";
 import { TaskModal } from "./components/TaskModal";
@@ -300,7 +299,14 @@ export function App() {
           />
         )}
 
-        {(activeView === "today" || activeView === "upcoming") && <TaskList tasks={scopedTasks} timeFormat={settings.timeFormat} {...taskListProps} />}
+        {(activeView === "today" || activeView === "upcoming") && (
+          <TaskList
+            tasks={scopedTasks}
+            timeFormat={settings.timeFormat}
+            viewMode={activeView === "upcoming" ? "upcoming" : "today"}
+            {...taskListProps}
+          />
+        )}
 
         {activeView === "projects" && (
           <ProjectsView
@@ -432,9 +438,12 @@ function ProjectsView({
   return (
     <div className="projects-view">
       <section className="category-create-panel">
-        <div>
-          <h2>{t("projects.manageCategories")}</h2>
-          <p>{t("projects.manageCategoriesDescription")}</p>
+        <div className="category-create-panel__title">
+          <FolderKanban size={17} />
+          <div>
+            <h2>{t("projects.manageCategories")}</h2>
+            <p>{t("projects.manageCategoriesDescription")}</p>
+          </div>
         </div>
         <div className="category-create">
           <input
@@ -458,9 +467,9 @@ function ProjectsView({
           const activeCount = projectTasks.filter((task) => task.status === "active").length;
           const completedCount = projectTasks.length - activeCount;
           return (
-            <article className="project-card" key={project.id}>
-              <span className="project-card__color" style={{ background: project.color }} />
-              <div className="project-card__header">
+            <article className="project-card project-row" key={project.id}>
+              <span className="project-card__color project-row__color" style={{ background: project.color }} />
+              <div className="project-card__header project-row__main">
                 {editingCategoryId === project.id ? (
                   <input
                     value={editingName}
@@ -476,11 +485,11 @@ function ProjectsView({
                 )}
                 <p>{project.description}</p>
               </div>
-              <div className="project-card__stats">
+              <div className="project-card__stats project-row__stats">
                 <span>{activeCount} {t("projects.active")}</span>
                 <span>{completedCount} {t("projects.done")}</span>
               </div>
-              <div className="project-card__actions">
+              <div className="project-card__actions project-row__actions">
                 {editingCategoryId === project.id ? (
                   <button className="icon-button" onClick={() => saveCategoryName(project.id)} type="button" aria-label={t("task.save")}>
                     <Save size={16} />
@@ -508,18 +517,15 @@ function ProjectsView({
         })}
       </section>
 
-      <section className="project-empty-panel">
-        <EmptyState
-          icon={FolderKanban}
-          title={t("projects.ready")}
-          description={t("projects.readyDescription")}
-          action={
-            <button className="button button--secondary" onClick={onOpenToday}>
-              <ListChecks size={16} />
-              {t("projects.reviewToday")}
-            </button>
-          }
-        />
+      <section className="project-empty-panel project-empty-panel--compact">
+        <div>
+          <strong>{t("projects.ready")}</strong>
+          <span>{t("projects.readyDescription")}</span>
+        </div>
+        <button className="button button--secondary" onClick={onOpenToday}>
+          <ListChecks size={16} />
+          {t("projects.reviewToday")}
+        </button>
       </section>
 
       <section className="inbox-strip">

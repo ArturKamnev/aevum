@@ -1,4 +1,4 @@
-import { AlertTriangle, CalendarClock, CheckCircle2, Clock3 } from "lucide-react";
+import { AlertTriangle, CalendarClock, CheckCircle2, Clock3, ListChecks } from "lucide-react";
 import { EmptyState } from "./EmptyState";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { QuickAddTask } from "./QuickAddTask";
@@ -26,18 +26,50 @@ export function Dashboard(props: DashboardProps) {
   const { tasks, projects, isLoading, onAddTask, onToggleTask, onDeleteTask, onUpdateTask, onToggleSubtask, onBreakDownTask, onEditTask, timeFormat } = props;
   const activeTasks = tasks.filter((task) => task.status === "active");
   const todaysTasks = activeTasks.filter((task) => isScheduledToday(task.scheduledAt)).sort((a, b) => compareScheduledAt(a.scheduledAt, b.scheduledAt));
-  const overdueTasks = activeTasks.filter((task) => isScheduledBeforeToday(task.scheduledAt));
+  const overdueTasks = activeTasks.filter((task) => isScheduledBeforeToday(task.scheduledAt)).sort((a, b) => compareScheduledAt(a.scheduledAt, b.scheduledAt));
   const upcomingTasks = activeTasks.filter((task) => isScheduledAfterToday(task.scheduledAt)).sort((a, b) => compareScheduledAt(a.scheduledAt, b.scheduledAt)).slice(0, 3);
+  const focusTask = overdueTasks[0] ?? todaysTasks[0] ?? upcomingTasks[0];
+  const focusProject = focusTask ? projects.find((project) => project.id === focusTask.projectId) : undefined;
+  const scheduleLabels = { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") };
 
   return (
     <div className="dashboard-grid">
       <section className="dashboard-hero">
-        <div>
+        <div className="dashboard-hero__copy">
           <span className="eyebrow">{t("dashboard.today")}</span>
           <h2>{t("dashboard.heroTitle")}</h2>
           <p>{t("dashboard.heroDescription")}</p>
         </div>
         <QuickAddTask projects={projects} onAddTask={onAddTask} />
+      </section>
+
+      <section className="dashboard-panel dashboard-panel--focus">
+        <div className="panel-heading">
+          <div>
+            <h2>{t("dashboard.focusTask")}</h2>
+            <p>{t("dashboard.focusTaskDescription")}</p>
+          </div>
+          <ListChecks size={17} />
+        </div>
+        {focusTask ? (
+          <div className="dashboard-focus-task">
+            <span className="dashboard-focus-task__color" style={{ background: focusProject?.color ?? "var(--accent)" }} />
+            <div>
+              <strong>{focusTask.title}</strong>
+              <span>
+                {formatScheduleLabel(focusTask.scheduledAt, scheduleLabels, language, timeFormat)}
+                {" - "}
+                {focusProject?.name ?? t("task.project")}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <EmptyState
+            icon={CheckCircle2}
+            title={t("dashboard.noFocusTask")}
+            description={t("dashboard.noFocusTaskDescription")}
+          />
+        )}
       </section>
 
       <section className="dashboard-panel dashboard-panel--large">
@@ -46,16 +78,12 @@ export function Dashboard(props: DashboardProps) {
             <h2>{t("dashboard.todaysTasks")}</h2>
             <p>{todaysTasks.length} {t("dashboard.activeDueToday")}</p>
           </div>
-          <Clock3 size={18} />
+          <Clock3 size={17} />
         </div>
         {isLoading ? (
           <LoadingSkeleton />
         ) : todaysTasks.length === 0 ? (
-          <EmptyState
-            icon={CheckCircle2}
-            title={t("dashboard.todayClear")}
-            description={t("dashboard.todayClearDescription")}
-          />
+          <EmptyState icon={CheckCircle2} title={t("dashboard.todayClear")} description={t("dashboard.todayClearDescription")} />
         ) : (
           <div className="dashboard-task-stack">
             {todaysTasks.map((task) => (
@@ -82,7 +110,7 @@ export function Dashboard(props: DashboardProps) {
             <h2>{t("dashboard.overdue")}</h2>
             <p>{t("dashboard.needsDecision")}</p>
           </div>
-          <AlertTriangle size={18} />
+          <AlertTriangle size={17} />
         </div>
         {overdueTasks.length === 0 ? (
           <EmptyState icon={CheckCircle2} title={t("dashboard.nothingOverdue")} description={t("dashboard.nothingOverdueDescription")} />
@@ -94,7 +122,7 @@ export function Dashboard(props: DashboardProps) {
                 <span>
                   {formatScheduleLabel(
                     task.scheduledAt,
-                    { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") },
+                    scheduleLabels,
                     language,
                     timeFormat,
                   )}
@@ -111,7 +139,7 @@ export function Dashboard(props: DashboardProps) {
             <h2>{t("dashboard.upcoming")}</h2>
             <p>{t("dashboard.nextDeadlines")}</p>
           </div>
-          <CalendarClock size={18} />
+          <CalendarClock size={17} />
         </div>
         {upcomingTasks.length === 0 ? (
           <EmptyState icon={CalendarClock} title={t("dashboard.noUpcoming")} description={t("dashboard.noUpcomingDescription")} />
@@ -123,7 +151,7 @@ export function Dashboard(props: DashboardProps) {
                 <span>
                   {formatScheduleLabel(
                     task.scheduledAt,
-                    { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") },
+                    scheduleLabels,
                     language,
                     timeFormat,
                   )}

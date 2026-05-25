@@ -1,10 +1,10 @@
-import { Search, SlidersHorizontal } from "lucide-react";
+import { CalendarDays, Search, SlidersHorizontal } from "lucide-react";
 import { useMemo } from "react";
 import { EmptyState } from "./EmptyState";
 import { TaskCard } from "./TaskCard";
 import { useI18n } from "../i18n";
 import type { Project, SortMode, Task, TaskStatus, TimeFormat } from "../types";
-import { compareScheduledAt } from "../utils/date";
+import { compareScheduledAt, formatScheduleLabel, getRelativeDateLabel, getScheduleDate } from "../utils/date";
 
 interface TaskListProps {
   tasks: Task[];
@@ -24,6 +24,7 @@ interface TaskListProps {
   onBreakDownTask?: (task: Task) => Promise<string[]>;
   onEditTask?: (task: Task) => void;
   timeFormat: TimeFormat;
+  viewMode?: "today" | "upcoming";
 }
 
 const statusScore: Record<TaskStatus, number> = { active: 0, completed: 1 };
@@ -55,7 +56,7 @@ export function filterAndSortTasks({
 }
 
 export function TaskList(props: TaskListProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const {
     tasks,
     projects,
@@ -74,18 +75,44 @@ export function TaskList(props: TaskListProps) {
   onBreakDownTask,
   onEditTask,
   timeFormat,
+  viewMode = "today",
   } = props;
 
   const visibleTasks = useMemo(
     () => filterAndSortTasks({ tasks, query, statusFilter, categoryFilter, sortMode }),
     [categoryFilter, query, sortMode, statusFilter, tasks],
   );
+  const scheduleLabels = { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") };
+  const upcomingGroups = useMemo(() => {
+    return visibleTasks.reduce<Record<string, Task[]>>((groups, task) => {
+      const date = getScheduleDate(task.scheduledAt) || "unscheduled";
+      groups[date] = [...(groups[date] ?? []), task];
+      return groups;
+    }, {});
+  }, [visibleTasks]);
+
+  function renderTask(task: Task) {
+    return (
+      <TaskCard
+        key={task.id}
+        task={task}
+        project={projects.find((project) => project.id === task.projectId)}
+        onToggleTask={onToggleTask}
+        onDeleteTask={onDeleteTask}
+        onUpdateTask={onUpdateTask}
+        onToggleSubtask={onToggleSubtask}
+        onBreakDownTask={onBreakDownTask}
+        onEditTask={onEditTask}
+        timeFormat={timeFormat}
+      />
+    );
+  }
 
   return (
-    <section className="task-list-panel">
+    <section className={`task-list-panel task-list-panel--${viewMode}`}>
       <div className="panel-heading">
         <div>
-          <h2>{t("task.tasks")}</h2>
+          <h2>{viewMode === "upcoming" ? t("nav.upcoming") : t("nav.today")}</h2>
           <p>{visibleTasks.length} {t("task.matchingItems")}</p>
         </div>
         <SlidersHorizontal size={18} />
@@ -122,21 +149,23 @@ export function TaskList(props: TaskListProps) {
             title={t("task.noMatch")}
             description={t("task.noMatchDescription")}
           />
+        ) : viewMode === "upcoming" ? (
+          <div className="upcoming-timeline">
+            {Object.entries(upcomingGroups).map(([date, dateTasks]) => (
+              <section className="upcoming-day" key={date}>
+                <div className="upcoming-day__date">
+                  <CalendarDays size={16} />
+                  <span>{date === "unscheduled" ? t("date.noDate") : getRelativeDateLabel(date, scheduleLabels, language)}</span>
+                  {date !== "unscheduled" ? <strong>{formatScheduleLabel(date, scheduleLabels, language, timeFormat)}</strong> : null}
+                </div>
+                <div className="upcoming-day__tasks">
+                  {dateTasks.map(renderTask)}
+                </div>
+              </section>
+            ))}
+          </div>
         ) : (
-          visibleTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              project={projects.find((project) => project.id === task.projectId)}
-              onToggleTask={onToggleTask}
-              onDeleteTask={onDeleteTask}
-              onUpdateTask={onUpdateTask}
-              onToggleSubtask={onToggleSubtask}
-              onBreakDownTask={onBreakDownTask}
-              onEditTask={onEditTask}
-              timeFormat={timeFormat}
-            />
-          ))
+          visibleTasks.map(renderTask)
         )}
       </div>
     </section>

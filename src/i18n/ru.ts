@@ -410,7 +410,7 @@ export const ru: Record<keyof typeof en, string> = {
   "onboarding.notifications": "Уведомления",
   "onboarding.firstTask": "Первая задача",
   "onboarding.welcomeTitle": "Добро пожаловать в Aevum",
-  "onboarding.welcomeDescription": "Настройте главное один раз: язык, тему, локальный AI, напоминания и первую задачу при желании.",
+  "onboarding.welcomeDescription": "Спокойный способ фиксировать, планировать и защищать важную работу.",
   "onboarding.chooseLanguage": "Выберите язык",
   "onboarding.languageDescription": "Выберите язык интерфейса для ежедневной работы.",
   "onboarding.chooseTheme": "Выберите тему",

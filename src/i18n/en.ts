@@ -408,7 +408,7 @@ export const en = {
   "onboarding.notifications": "Notifications",
   "onboarding.firstTask": "First task",
   "onboarding.welcomeTitle": "Welcome to Aevum",
-  "onboarding.welcomeDescription": "Set up the essentials once: language, theme, local AI, reminders, and an optional first task.",
+  "onboarding.welcomeDescription": "A quieter way to capture, plan, and protect the work that matters.",
   "onboarding.chooseLanguage": "Choose language",
   "onboarding.languageDescription": "Pick the interface language you want to use every day.",
   "onboarding.chooseTheme": "Choose theme",
