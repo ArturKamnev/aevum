@@ -19,6 +19,7 @@ import {
   PlayCircle,
   RefreshCw,
   RotateCcw,
+  Send,
   Sun,
   Trash2,
 } from "lucide-react";
@@ -62,6 +63,7 @@ const weekdayNumbers = [1, 2, 3, 4, 5, 6, 0];
 export function SettingsPage({ clearAiHistory, settings, updateSettings }: SettingsPageProps) {
   const { language, languageNames, setLanguage, t } = useI18n();
   const openRouterKeyRef = useRef<HTMLInputElement>(null);
+  const telegramTokenRef = useRef<HTMLInputElement>(null);
   const [appVersion, setAppVersion] = useState("");
   const [ollamaStatus, setOllamaStatus] = useState<SetupStatus | null>(null);
   const [isRefreshingModels, setIsRefreshingModels] = useState(false);
@@ -84,6 +86,9 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const [cacheStatus, setCacheStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [storageNotice, setStorageNotice] = useState("");
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [telegramStatus, setTelegramStatus] = useState<TelegramStatusResult | null>(null);
+  const [telegramConnecting, setTelegramConnecting] = useState(false);
+  const [telegramNotice, setTelegramNotice] = useState("");
 
   const installedModels = ollamaStatus?.models ?? [];
   const selectedModelInstalled = ollamaStatus?.selectedModelInstalled ?? installedModels.some((model) => model.name === settings.localModel);
@@ -114,12 +119,15 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
       }
       if (payload.status === "error") setPullState("error");
     });
+    const removeTelegramListener = window.todoAI?.onTelegramStatus((payload) => setTelegramStatus(payload));
 
     void refreshOllamaStatus(false);
+    void refreshTelegramStatus();
     return () => {
       isMounted = false;
       removeUpdateListener?.();
       removePullListener?.();
+      removeTelegramListener?.();
     };
   }, []);
 
@@ -234,6 +242,58 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
     setHasOpenRouterKey(false);
     setOpenRouterStatus("missing-key");
     setOpenRouterStatusMessage("");
+  }
+
+  async function refreshTelegramStatus() {
+    const status = await window.todoAI?.getTelegramStatus();
+    if (status) setTelegramStatus(status);
+  }
+
+  async function handleTelegramToggle(enabled: boolean) {
+    updateSettings({ telegramAssistantEnabled: enabled });
+    const status = await window.todoAI?.updateTelegramSettings({
+      enabled,
+      language: settings.language,
+      useDefaultAI: settings.telegramUseDefaultAI,
+      aiProvider: settings.telegramAIProvider,
+      localModel: settings.telegramLocalModel,
+      cloudModel: settings.telegramCloudModel,
+    });
+    if (status) setTelegramStatus(status);
+  }
+
+  async function handleConnectTelegram() {
+    const input = telegramTokenRef.current;
+    const token = input?.value.trim() ?? "";
+    if (input) input.value = "";
+    setTelegramConnecting(true);
+    setTelegramNotice("");
+    try {
+      const result = await window.todoAI?.setTelegramBotToken(token);
+      if (result) setTelegramStatus(result);
+      if (!result?.ok) setTelegramNotice(result?.message ?? t("settings.telegramInvalidToken"));
+      else updateSettings({ telegramAssistantEnabled: true });
+    } finally {
+      setTelegramConnecting(false);
+    }
+  }
+
+  async function handleDisconnectTelegram() {
+    const result = await window.todoAI?.disconnectTelegramBot();
+    if (result) setTelegramStatus(result);
+    updateSettings({ telegramAssistantEnabled: false });
+    setTelegramNotice("");
+  }
+
+  async function handleUnpairTelegram() {
+    const result = await window.todoAI?.unpairTelegramChat();
+    if (result) setTelegramStatus(result);
+  }
+
+  async function handleReconnectTelegramPolling() {
+    const result = await window.todoAI?.reconnectTelegramPolling();
+    if (result) setTelegramStatus(result);
+    if (!result?.ok) setTelegramNotice(result?.message ?? t("settings.telegramPollingError"));
   }
 
   function addAvailabilityBlock() {
@@ -639,6 +699,150 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         ) : null}
       </SettingsSection>
 
+      <SettingsSection icon={Send} title={t("settings.telegramAssistant")} description={t("settings.telegramAssistantDescription")}>
+        <label className="toggle-row">
+          <span>
+            <strong>{t("settings.telegramEnable")}</strong>
+            <small>{t("settings.telegramRunNote")}</small>
+          </span>
+          <input checked={settings.telegramAssistantEnabled} onChange={(event) => void handleTelegramToggle(event.target.checked)} type="checkbox" />
+        </label>
+
+        <div className="field-row">
+          <span>{t("task.sort.status")}</span>
+          <div className="status-row-actions">
+            <span className={`status-pill status-pill--${telegramStatusTone(telegramStatus?.status)}`}>
+              {formatTelegramStatus(telegramStatus?.status, t)}
+            </span>
+            <button className="button button--secondary" onClick={() => void refreshTelegramStatus()} type="button">
+              <RefreshCw size={14} />
+              {t("settings.refreshModels")}
+            </button>
+          </div>
+        </div>
+
+        <div className="advanced-settings telegram-settings-panel">
+          <label className="field-row">
+            <span>{t("settings.telegramBotToken")}</span>
+            <input ref={telegramTokenRef} type="password" placeholder="123456789:AA..." autoComplete="off" />
+          </label>
+          <div className="ai-settings-actions">
+            <button className="button button--primary" disabled={telegramConnecting} onClick={() => void handleConnectTelegram()} type="button">
+              {telegramConnecting ? <Loader2 size={14} className="spin-icon" /> : <KeyRound size={14} />}
+              {t("settings.telegramConnect")}
+            </button>
+            <button className="button button--secondary" disabled={!telegramStatus?.hasToken} onClick={() => void handleDisconnectTelegram()} type="button">
+              <Trash2 size={14} />
+              {t("settings.telegramDisconnect")}
+            </button>
+          </div>
+        </div>
+
+        {telegramStatus?.status === "webhook-conflict" ? (
+          <SetupCallout
+            icon={<AlertTriangle size={15} />}
+            title={t("settings.telegramWebhookConflict")}
+            description={t("settings.telegramWebhookConflictDescription")}
+            action={
+              <button className="button button--primary" onClick={() => void handleReconnectTelegramPolling()} type="button">
+                <RefreshCw size={14} />
+                {t("settings.telegramReconnectPolling")}
+              </button>
+            }
+          />
+        ) : null}
+
+        {telegramStatus?.hasToken && !telegramStatus.pairedChat ? (
+          <div className="telegram-pairing-panel">
+            <div>
+              <strong>{t("settings.telegramPairingCode")}</strong>
+              <p>{t("settings.telegramPairingDescription")}</p>
+            </div>
+            <code>{telegramStatus.pairingCode ?? "------"}</code>
+          </div>
+        ) : null}
+
+        {telegramStatus?.pairedChat ? (
+          <div className="setup-callout setup-callout--compact">
+            <span className="setup-callout__icon"><CheckCircle2 size={15} /></span>
+            <div className="callout-text-wrapper">
+              <strong>{t("settings.telegramPaired")}</strong>
+              <p>{formatTelegramChat(telegramStatus.pairedChat)}</p>
+            </div>
+            <button className="button button--secondary" onClick={() => void handleUnpairTelegram()} type="button">
+              {t("settings.telegramUnpair")}
+            </button>
+          </div>
+        ) : null}
+
+        {telegramStatus?.pairedChat ? (
+          <div className="field-row">
+            <span>{t("settings.telegramCurrentMode")}</span>
+            <span className="status-pill status-pill--neutral">
+              {telegramStatus.interactionMode === "ai" ? t("settings.telegramAIMode") : t("settings.telegramTemplateMode")}
+            </span>
+          </div>
+        ) : null}
+
+        <label className="toggle-row">
+          <span>
+            <strong>{t("settings.telegramUseDefaultAI")}</strong>
+            <small>{t("settings.telegramUseDefaultAIDescription")}</small>
+          </span>
+          <input checked={settings.telegramUseDefaultAI} onChange={(event) => updateSettings({ telegramUseDefaultAI: event.target.checked })} type="checkbox" />
+        </label>
+
+        {!settings.telegramUseDefaultAI ? (
+          <div className="advanced-settings">
+            <div className="segmented-control segmented-control-spacing">
+              {[
+                { value: "ollama", label: t("settings.localAI"), icon: Cpu },
+                { value: "openrouter", label: t("settings.cloudAI"), icon: KeyRound },
+              ].map((option) => {
+                const Icon = option.icon;
+                return (
+                  <button
+                    className={settings.telegramAIProvider === option.value ? "segmented-control__item segmented-control__item--active" : "segmented-control__item"}
+                    key={option.value}
+                    onClick={() => updateSettings({ telegramAIProvider: option.value as AIProvider })}
+                    type="button"
+                  >
+                    <Icon size={14} />
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+            {settings.telegramAIProvider === "ollama" ? (
+              <label className="field-row">
+                <span>{t("settings.localModel")}</span>
+                <select
+                  value={installedModels.some((model) => model.name === settings.telegramLocalModel) ? settings.telegramLocalModel : settings.localModel}
+                  onChange={(event) => updateSettings({ telegramLocalModel: event.target.value })}
+                >
+                  {installedModels.length ? null : <option value={settings.localModel}>{settings.localModel}</option>}
+                  {installedModels.map((model) => (
+                    <option key={model.name} value={model.name}>{model.name}</option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <label className="field-row">
+                <span>{t("settings.cloudModel")}</span>
+                <select value={settings.telegramCloudModel} onChange={(event) => updateSettings({ telegramCloudModel: event.target.value })}>
+                  {openRouterModelOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{t(option.labelKey)}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+        ) : null}
+
+        <p className="settings-helper-inline">{t("settings.telegramSecurityNote")}</p>
+        {telegramNotice || telegramStatus?.message ? <p className="settings-error">{telegramNotice || telegramStatus?.message}</p> : null}
+      </SettingsSection>
+
       <SettingsSection icon={CalendarClock} title={t("settings.schedule")} description={t("settings.scheduleDescription")}>
         <div className="availability-editor">
           <div className="availability-editor__field">
@@ -972,6 +1176,27 @@ function formatOpenRouterStatus(status: "idle" | "checking" | "connected" | "mis
   if (status === "offline") return t("settings.openRouterOffline");
   if (status === "missing-key" || !hasKey) return t("settings.openRouterMissingKey");
   return t("settings.notChecked");
+}
+
+function formatTelegramStatus(status: TelegramBridgeStatus | undefined, t: ReturnType<typeof useI18n>["t"]) {
+  if (status === "connecting") return t("settings.telegramStatusConnecting");
+  if (status === "connected") return t("settings.telegramStatusConnected");
+  if (status === "invalid-token") return t("settings.telegramStatusInvalidToken");
+  if (status === "not-paired") return t("settings.telegramStatusNotPaired");
+  if (status === "webhook-conflict") return t("settings.telegramStatusWebhookConflict");
+  if (status === "error") return t("settings.telegramStatusError");
+  return t("settings.telegramStatusDisabled");
+}
+
+function telegramStatusTone(status: TelegramBridgeStatus | undefined) {
+  if (status === "connected") return "connected";
+  if (status === "not-paired" || status === "connecting") return "model-missing";
+  return "not-connected";
+}
+
+function formatTelegramChat(chat: NonNullable<TelegramStatusResult["pairedChat"]>) {
+  const label = chat.username ? `@${chat.username}` : chat.firstName || "Private chat";
+  return `${label} · ${chat.id}`;
 }
 
 function getWeekdayShort(day: number, t: ReturnType<typeof useI18n>["t"]) {

@@ -33,6 +33,8 @@ export function CommandPalette({ isOpen, onClose, setActiveView, onToggleTheme, 
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [shouldRender, setShouldRender] = useState(isOpen);
+  const [isClosing, setIsClosing] = useState(false);
 
   const commands = useMemo<Command[]>(
     () => [
@@ -102,6 +104,22 @@ export function CommandPalette({ isOpen, onClose, setActiveView, onToggleTheme, 
   });
 
   useEffect(() => {
+    if (isOpen) {
+      setShouldRender(true);
+      setIsClosing(false);
+      return;
+    }
+
+    if (!shouldRender) return;
+    setIsClosing(true);
+    const timer = window.setTimeout(() => {
+      setShouldRender(false);
+      setIsClosing(false);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [isOpen, shouldRender]);
+
+  useEffect(() => {
     if (!isOpen) return;
     setQuery("");
     setActiveIndex(0);
@@ -135,10 +153,10 @@ export function CommandPalette({ isOpen, onClose, setActiveView, onToggleTheme, 
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeIndex, filteredCommands, isOpen, onClose]);
 
-  if (!isOpen) return null;
+  if (!shouldRender) return null;
 
   return (
-    <div className="command-overlay" role="presentation" onMouseDown={onClose}>
+    <div className={`command-overlay ${isClosing ? "command-overlay--closing" : ""}`} role="presentation" onMouseDown={onClose}>
       <div className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" onMouseDown={(event) => event.stopPropagation()}>
         <div className="command-palette__search">
           <Search size={18} />

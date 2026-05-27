@@ -1,9 +1,9 @@
-import type { AIMode, AssistantMessage, AvailabilityBlock, ReminderOffsetMinutes, RepeatRule, Task, UserSettings } from "../types";
+import type { AIMode, AssistantMessage, AvailabilityBlock, Project, ReminderOffsetMinutes, RepeatRule, Task, TaskStatus, UserSettings } from "../types";
 import { getScheduleDate, getScheduleTime, getTodayISO, normalizeScheduledAt } from "../utils/date";
 import { defaultRepeat, normalizeRepeat } from "../utils/recurrence";
 
 export type AIConnectionStatus = "idle" | "connected" | "not-connected" | "model-missing";
-type StructuredSchema = "create_tasks" | "plan_day" | "replan_tasks" | "create_subtasks";
+type StructuredSchema = "create_tasks" | "plan_day" | "replan_tasks" | "manage_tasks" | "create_subtasks";
 const dayMinutes = 24 * 60;
 const guideMaxLength = 2000;
 const taskDraftMaxLength = 800;
@@ -50,7 +50,43 @@ export interface ScheduleTasksAction {
   changes: ScheduleChangeDraft[];
 }
 
-export type AssistantAction = CreateTasksAction | ScheduleTasksAction;
+export interface ManageTaskChanges {
+  title?: string;
+  description?: string;
+  scheduledAt?: string | null;
+  durationMinutes?: number | null;
+  reminderMinutes?: ReminderOffsetMinutes | null;
+  projectId?: string;
+}
+
+export interface ManageTaskUpdateOperation {
+  operation: "update";
+  taskId: string;
+  changes: ManageTaskChanges;
+  reason?: string;
+}
+
+export interface ManageTaskStatusOperation {
+  operation: "set_status";
+  taskId: string;
+  status: TaskStatus;
+  reason?: string;
+}
+
+export interface ManageTaskDeleteOperation {
+  operation: "delete";
+  taskId: string;
+  reason?: string;
+}
+
+export type ManageTaskOperation = ManageTaskUpdateOperation | ManageTaskStatusOperation | ManageTaskDeleteOperation;
+
+export interface ManageTasksAction {
+  type: "manage_tasks";
+  operations: ManageTaskOperation[];
+}
+
+export type AssistantAction = CreateTasksAction | ScheduleTasksAction | ManageTasksAction;
 
 export interface AIChatResult {
   message: AssistantMessage;
@@ -72,6 +108,11 @@ interface PlanDayResult {
 interface SubtasksResult {
   userMessage: string;
   subtasks: string[];
+}
+
+interface ManageTasksResult {
+  userMessage: string;
+  action?: ManageTasksAction;
 }
 
 type AIRequestMode = "guide" | "guide_repair" | StructuredSchema | `${StructuredSchema}_repair`;
@@ -148,7 +189,7 @@ function authorizeActionResult(
       message: createAssistantMessage(
         language === "ru"
           ? "Чтобы создать или спланировать задачи, пожалуйста, выберите соответствующий инструмент в меню +."
-          : "To create or plan tasks, please select the appropriate tool from the + menu."
+          : "To create, plan, or manage tasks, please select the appropriate tool from the + menu."
       ),
       action: undefined,
     };
@@ -163,7 +204,7 @@ function authorizeActionResult(
         message: createAssistantMessage(
           language === "ru"
             ? "В этом режиме разрешено только создание задач. Пожалуйста, выберите инструмент «Спланировать день»."
-            : "Only task creation is allowed in this mode. Please select the Plan My Day tool."
+            : "Only task creation is allowed in this mode. For planning or managing tasks, choose the matching tool."
         ),
         action: undefined,
       };
@@ -179,11 +220,25 @@ function authorizeActionResult(
         message: createAssistantMessage(
           language === "ru"
             ? "В этом режиме разрешено только планирование задач. Пожалуйста, выберите инструмент «Создать задачи»."
-            : "Only task scheduling is allowed in this mode. Please select the Create Tasks tool."
+            : "Only task scheduling is allowed in this mode. For creating or managing tasks, choose the matching tool."
         ),
         action: undefined,
       };
     }
+  }
+
+  if (mode === "manage_tasks") {
+    if (action.type === "manage_tasks") {
+      return result;
+    }
+    return {
+      message: createAssistantMessage(
+        language === "ru"
+          ? "\u0412 \u044d\u0442\u043e\u043c \u0440\u0435\u0436\u0438\u043c\u0435 \u043c\u043e\u0436\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u0437\u043c\u0435\u043d\u044f\u0442\u044c \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 \u0437\u0430\u0434\u0430\u0447\u0438. \u0414\u043b\u044f \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0438\u043b\u0438 \u043f\u043b\u0430\u043d\u0430 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u043e\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442."
+          : "Only existing task management is allowed in this mode. To create tasks or plan a day, choose the matching tool."
+      ),
+      action: undefined,
+    };
   }
 
   return result;
@@ -194,8 +249,9 @@ export async function chatWithAssistant(
   taskContext: Task[],
   settings: UserSettings,
   mode: AIMode | null,
+  projectContext: Project[] = [],
 ): Promise<AIChatResult> {
-  const result = await chatWithAssistantInternal(userMessage, taskContext, settings, mode);
+  const result = await chatWithAssistantInternal(userMessage, taskContext, settings, mode, projectContext);
   return authorizeActionResult(result, mode, settings.language);
 }
 
@@ -204,11 +260,13 @@ async function chatWithAssistantInternal(
   taskContext: Task[],
   settings: UserSettings,
   mode: AIMode | null,
+  projectContext: Project[],
 ): Promise<AIChatResult> {
   if (mode === null) {
     const msg = userMessage.toLowerCase().trim();
     const isActionRequest =
       msg.startsWith("create ") || msg.startsWith("add ") || msg.startsWith("schedule ") || msg.startsWith("plan ") ||
+      msg.startsWith("delete ") || msg.startsWith("remove ") || msg.startsWith("edit ") || msg.startsWith("rename ") || msg.startsWith("mark ") || msg.startsWith("complete ") || msg.startsWith("reopen ") || msg.startsWith("reschedule ") ||
       msg.startsWith("создай") || msg.startsWith("добавь") || msg.startsWith("запланируй") || msg.startsWith("спланируй") || msg.startsWith("распланируй") ||
       msg.includes("создай задачу") || msg.includes("создать задачу") || msg.includes("добавь задачу") || msg.includes("добавить задачу");
 
@@ -217,7 +275,7 @@ async function chatWithAssistantInternal(
         message: createAssistantMessage(
           settings.language === "ru"
             ? "Чтобы создать или спланировать задачи, пожалуйста, выберите соответствующий инструмент в меню +."
-            : "To create or plan tasks, please select the appropriate tool from the + menu."
+            : "To create, plan, or manage tasks, please select the appropriate tool from the + menu."
         ),
         action: undefined,
       };
@@ -245,6 +303,15 @@ async function chatWithAssistantInternal(
     return {
       message: createAssistantMessage(renderPlanMessage(plan, settings.language)),
       action: plan.action,
+    };
+  }
+
+  if (mode === "manage_tasks") {
+    const systemPrompt = buildManageTasksPrompt(taskContext, projectContext, settings.language);
+    const result = await requestStructuredAI(userMessage, systemPrompt, "manage_tasks", settings, (value) => validateManageTasksResult(value, taskContext, projectContext, settings.language));
+    return {
+      message: createAssistantMessage(renderManageTasksMessage(result, settings.language), result.action ? { actionType: result.action.type } : undefined),
+      action: result.action,
     };
   }
 
@@ -609,6 +676,76 @@ Rules:
 - Do not claim tasks were created. The app creates them after user confirmation.`;
 }
 
+function buildManageTasksPrompt(taskContext: Task[], projectContext: Project[], language: UserSettings["language"]) {
+  const projectSummary = projectContext
+    .slice(0, 30)
+    .map((project) => `- id=${project.id} | ${project.name}`)
+    .join("\n");
+
+  return `${baseStructuredPrompt(taskContext, [], language)}
+Mode: manage_tasks.
+The user wants to manage existing tasks. Return one valid JSON object only.
+When a safe mutation is possible:
+{
+  "userMessage": "${language === "ru" ? "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u043f\u0435\u0440\u0435\u0434 \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0438\u0435\u043c." : "Review these changes before applying them."}",
+  "action": {
+    "type": "manage_tasks",
+    "operations": [
+      {
+        "operation": "update",
+        "taskId": "existing-task-id",
+        "changes": {
+          "title": "New title",
+          "description": "New description",
+          "scheduledAt": "2026-05-28T18:00",
+          "durationMinutes": 45,
+          "reminderMinutes": 10,
+          "projectId": "existing-project-id"
+        },
+        "reason": "The user asked to reschedule it."
+      },
+      {
+        "operation": "set_status",
+        "taskId": "existing-task-id",
+        "status": "completed",
+        "reason": "The user asked to mark it done."
+      },
+      {
+        "operation": "delete",
+        "taskId": "existing-task-id",
+        "reason": "The user asked to delete it."
+      }
+    ]
+  }
+}
+
+When the request is ambiguous, unsupported, has no effect, or refers to a missing/deleted task, return:
+{
+  "userMessage": "${language === "ru" ? "\u0423\u0442\u043e\u0447\u043d\u0438\u0442\u0435, \u043a\u0430\u043a\u0443\u044e \u0438\u043c\u0435\u043d\u043d\u043e \u0437\u0430\u0434\u0430\u0447\u0443 \u0432\u044b \u0438\u043c\u0435\u0435\u0442\u0435 \u0432 \u0432\u0438\u0434\u0443." : "Please clarify which exact task you mean."}",
+  "action": null
+}
+
+Allowed update fields:
+- title, description, scheduledAt, durationMinutes, reminderMinutes, projectId.
+- scheduledAt may be null, "YYYY-MM-DD", or "YYYY-MM-DDTHH:mm".
+- durationMinutes may be null or a positive integer.
+- reminderMinutes may be null, 0, 5, 10, 30, or 60.
+- projectId must be one of the existing project IDs below. Do not create, rename, or delete categories/projects.
+
+Rules:
+- Use only task IDs from Current tasks. Never invent IDs and never use a title in taskId.
+- If multiple listed tasks could match the user's words, do not guess. Ask which task they mean and set action to null.
+- If the task already has the requested value/status, explain briefly and set action to null.
+- Delete is allowed only for an existing listed task and still requires app confirmation.
+- Do not create tasks, plan a day, change settings, edit providers, edit API keys, change notifications, navigate the app, or alter onboarding/system behavior.
+- Recurrence, subtasks, tags, deadlines, provider/model settings, and category architecture changes are not supported in this mode.
+- If the user says tomorrow, Friday, or another relative date, resolve from current date ${getTodayISO()}.
+- Do not claim anything was saved. The app applies changes only after user confirmation.
+
+Existing projects:
+${projectSummary || "No projects."}`;
+}
+
 function buildBreakdownPrompt(task: Task, language: UserSettings["language"]) {
   return `You are Aevum inside a desktop task app.
 ${languageInstruction(language)}
@@ -630,8 +767,8 @@ Task description: ${task.description || "No description."}`;
 
 function baseStructuredPrompt(taskContext: Task[], availabilityBlocks: AvailabilityBlock[], language: UserSettings["language"]) {
   const taskSummary = taskContext
-    .slice(0, 20)
-    .map((task) => `- id=${task.id} | ${task.title} | status=${task.status} | scheduledAt=${task.scheduledAt ?? "none"} | duration=${task.durationMinutes ?? "none"} | reminder=${task.reminderMinutes ?? "default"} | repeat=${task.repeat.enabled ? "yes" : "no"} | eligible=${isEligibleForPlan(task, "plan_day") ? "yes" : "no"} | replanEligible=${isEligibleForPlan(task, "replan_tasks") ? "yes" : "no"}`)
+    .slice(0, 50)
+    .map((task) => `- id=${task.id} | title=${task.title} | description=${task.description ? task.description.slice(0, 120) : "none"} | status=${task.status} | projectId=${task.projectId} | scheduledAt=${task.scheduledAt ?? "none"} | duration=${task.durationMinutes ?? "none"} | reminder=${task.reminderMinutes ?? "default"} | repeat=${task.repeat.enabled ? "yes" : "no"} | eligible=${isEligibleForPlan(task, "plan_day") ? "yes" : "no"} | replanEligible=${isEligibleForPlan(task, "replan_tasks") ? "yes" : "no"}`)
     .join("\n");
   const availabilitySummary = availabilityBlocks
     .map((block) => `- ${block.label}: weekdays=${block.weekdays.join(",")} ${block.startTime}-${block.endTime}`)
@@ -707,6 +844,31 @@ function validatePlanDayResult(
   };
 }
 
+function validateManageTasksResult(
+  value: unknown,
+  taskContext: Task[],
+  projectContext: Project[],
+  language: UserSettings["language"],
+): ManageTasksResult | undefined {
+  if (!isRecord(value)) return undefined;
+  const userMessage = readUserMessage(value) || manageReviewMessage(language);
+  if (!isTextQualitySafe(userMessage, language)) return undefined;
+
+  if (value.action === null || value.action === undefined) {
+    return { userMessage };
+  }
+
+  const actionSource = isRecord(value.action) ? value.action : value.type === "manage_tasks" ? value : undefined;
+  if (!actionSource) return { userMessage };
+
+  const action = readManageTasksAction(actionSource, taskContext, projectContext);
+  if (!action) {
+    return { userMessage: manageNoSafeChangeMessage(language) };
+  }
+
+  return { userMessage, action };
+}
+
 function validateSubtasksResult(value: unknown): SubtasksResult | undefined {
   if (!isRecord(value)) return undefined;
   const rawSubtasks = Array.isArray(value.subtasks) ? value.subtasks : Array.isArray(value.tasks) ? value.tasks : undefined;
@@ -739,6 +901,100 @@ function readTaskDraft(value: unknown): AITaskDraft | undefined {
     projectName: typeof value.projectName === "string" && value.projectName.trim() ? value.projectName.trim() : undefined,
     tags: Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string").map((tag) => tag.trim()).filter(Boolean) : [],
   };
+}
+
+function readManageTasksAction(value: unknown, tasks: Task[], projects: Project[]): ManageTasksAction | undefined {
+  if (!isRecord(value) || value.type !== "manage_tasks" || !Array.isArray(value.operations)) return undefined;
+  const operations: ManageTaskOperation[] = [];
+  const deletedTaskIds = new Set<string>();
+
+  for (const rawOperation of value.operations.slice(0, 8)) {
+    const operation = readManageTaskOperation(rawOperation, tasks, projects);
+    if (!operation) continue;
+    if (operation.operation === "delete") {
+      deletedTaskIds.add(operation.taskId);
+      for (let index = operations.length - 1; index >= 0; index -= 1) {
+        if (operations[index].taskId === operation.taskId) operations.splice(index, 1);
+      }
+      operations.push(operation);
+      continue;
+    }
+    if (deletedTaskIds.has(operation.taskId)) continue;
+    operations.push(operation);
+  }
+
+  return operations.length ? { type: "manage_tasks", operations } : undefined;
+}
+
+function readManageTaskOperation(value: unknown, tasks: Task[], projects: Project[]): ManageTaskOperation | undefined {
+  if (!isRecord(value) || typeof value.taskId !== "string") return undefined;
+  const task = tasks.find((item) => item.id === value.taskId);
+  if (!task) return undefined;
+  const reason = typeof value.reason === "string" && isTaskDraftTextSafe(value.reason) ? value.reason.trim() : undefined;
+
+  if (value.operation === "delete") {
+    return { operation: "delete", taskId: task.id, reason };
+  }
+
+  if (value.operation === "set_status") {
+    if (value.status !== "active" && value.status !== "completed") return undefined;
+    if (task.status === value.status) return undefined;
+    return { operation: "set_status", taskId: task.id, status: value.status, reason };
+  }
+
+  if (value.operation === "update") {
+    const changes = readManageTaskChanges(value.changes, task, projects);
+    if (!changes) return undefined;
+    return { operation: "update", taskId: task.id, changes, reason };
+  }
+
+  return undefined;
+}
+
+function readManageTaskChanges(value: unknown, task: Task, projects: Project[]): ManageTaskChanges | undefined {
+  if (!isRecord(value)) return undefined;
+  const changes: ManageTaskChanges = {};
+
+  if ("title" in value) {
+    if (typeof value.title !== "string" || !isTaskDraftTextSafe(value.title)) return undefined;
+    const title = value.title.trim();
+    if (title && title !== task.title) changes.title = title;
+  }
+
+  if ("description" in value) {
+    if (typeof value.description !== "string") return undefined;
+    const description = value.description.trim();
+    if (description !== task.description) changes.description = description;
+  }
+
+  if ("scheduledAt" in value) {
+    if (typeof value.scheduledAt !== "string" && value.scheduledAt !== null) return undefined;
+    const scheduledAt = normalizeScheduledAt(value.scheduledAt);
+    if (scheduledAt && !isReasonableScheduleDate(scheduledAt)) return undefined;
+    if (scheduledAt !== task.scheduledAt) changes.scheduledAt = scheduledAt;
+  }
+
+  if ("durationMinutes" in value) {
+    if (value.durationMinutes !== null && typeof value.durationMinutes !== "number") return undefined;
+    const durationMinutes = value.durationMinutes === null ? null : readDurationMinutes(value.durationMinutes);
+    if (value.durationMinutes !== null && durationMinutes === null) return undefined;
+    if (durationMinutes !== task.durationMinutes) changes.durationMinutes = durationMinutes;
+  }
+
+  if ("reminderMinutes" in value) {
+    const reminderMinutes = value.reminderMinutes === null ? null : readReminderMinutes(value.reminderMinutes);
+    if (value.reminderMinutes !== null && reminderMinutes === null) return undefined;
+    if (reminderMinutes !== task.reminderMinutes) changes.reminderMinutes = reminderMinutes;
+  }
+
+  if ("projectId" in value) {
+    if (typeof value.projectId !== "string") return undefined;
+    const project = projects.find((item) => item.id === value.projectId);
+    if (!project) return undefined;
+    if (project.id !== task.projectId) changes.projectId = project.id;
+  }
+
+  return Object.keys(changes).length ? changes : undefined;
 }
 
 function readScheduleAction(value: unknown, tasks: Task[], availabilityBlocks: AvailabilityBlock[], mode: "plan_day" | "replan_tasks"): ScheduleTasksAction | undefined {
@@ -850,6 +1106,23 @@ function renderCreateTasksMessage(count: number, language: UserSettings["languag
       : `\u042f \u043d\u0430\u0448\u0435\u043b ${count} \u0437\u0430\u0434\u0430\u0447. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0438\u0445 \u043f\u0435\u0440\u0435\u0434 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0435\u043c.`;
   }
   return count === 1 ? "I found 1 task. Review it before creating it." : `I found ${count} tasks. Review them before creating them.`;
+}
+
+function renderManageTasksMessage(result: ManageTasksResult, language: UserSettings["language"]) {
+  if (!result.action) return sanitizeAssistantText(result.userMessage, manageNoSafeChangeMessage(language));
+  return sanitizeAssistantText(result.userMessage, manageReviewMessage(language));
+}
+
+function manageReviewMessage(language: UserSettings["language"]) {
+  return language === "ru"
+    ? "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u043f\u0435\u0440\u0435\u0434 \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0438\u0435\u043c."
+    : "Review these changes before applying them.";
+}
+
+function manageNoSafeChangeMessage(language: UserSettings["language"]) {
+  return language === "ru"
+    ? "\u042f \u043d\u0435 \u043d\u0430\u0448\u0435\u043b \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0435 \u0438 \u043e\u0434\u043d\u043e\u0437\u043d\u0430\u0447\u043d\u043e\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435. \u0423\u0442\u043e\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u0434\u0430\u0447\u0443 \u0438 \u043d\u0443\u0436\u043d\u043e\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435."
+    : "I could not find a safe, unambiguous task change. Please clarify the task and the change you want.";
 }
 
 function sanitizeAssistantText(value: string, fallback: string) {
@@ -1104,7 +1377,7 @@ function modelMatches(installedModel: string, selectedModel: string) {
 
 function isLanguageSafeStructured(value: unknown, schema: StructuredSchema, _language: UserSettings["language"]) {
   if (hasCjkCharacters(JSON.stringify(value))) return false;
-  if ((schema === "plan_day" || schema === "replan_tasks" || schema === "create_tasks") && isRecord(value)) {
+  if ((schema === "plan_day" || schema === "replan_tasks" || schema === "create_tasks" || schema === "manage_tasks") && isRecord(value)) {
     return typeof value.userMessage !== "string" || isTaskDraftTextSafe(value.userMessage);
   }
   return true;

@@ -6,6 +6,7 @@ import keytar from "keytar";
 import os from "node:os";
 import path from "node:path";
 import recommendedModelsJson from "./recommended_models.json";
+import { TelegramBridge, type TelegramBridgeSettings } from "./telegramService";
 
 const isDev = !app.isPackaged;
 const ollamaDownloadUrl = "https://ollama.com/download";
@@ -76,6 +77,7 @@ let updateState: { status: UpdateStatus; message?: string; version?: string; pro
 let activePull: ChildProcessWithoutNullStreams | null = null;
 const notificationTimers = new Map<string, NodeJS.Timeout>();
 const firedNotifications = new Set<string>();
+const telegramBridge = new TelegramBridge(broadcast);
 
 autoUpdater.autoDownload = false;
 autoUpdater.autoInstallOnAppQuit = false;
@@ -158,6 +160,14 @@ app.whenReady().then(() => {
     title: appName,
     body: "Notifications are ready.",
   }));
+  ipcMain.handle("telegram:get-status", async () => telegramBridge.getStatusAsync());
+  ipcMain.handle("telegram:set-token", async (_event, token?: unknown) => telegramBridge.connectToken(token));
+  ipcMain.handle("telegram:disconnect", async () => telegramBridge.disconnect());
+  ipcMain.handle("telegram:unpair", async () => telegramBridge.unpair());
+  ipcMain.handle("telegram:reconnect-polling", async () => telegramBridge.reconnectPolling());
+  ipcMain.handle("telegram:update-settings", async (_event, settings?: unknown) => telegramBridge.setSettings(readTelegramBridgeSettings(settings)));
+  ipcMain.handle("telegram:renderer-ready", () => telegramBridge.markRendererReady());
+  ipcMain.handle("telegram:renderer-response", (_event, payload?: unknown) => telegramBridge.handleRendererResponse(payload));
   createWindow();
 
   app.on("activate", () => {
@@ -171,6 +181,10 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("before-quit", () => {
+  telegramBridge.stop();
 });
 
 autoUpdater.on("checking-for-update", () => setUpdateState({ status: "checking" }));
@@ -778,6 +792,18 @@ function isSafeModelName(value: string) {
 
 function modelMatches(installedModel: string, selectedModel: string) {
   return installedModel === selectedModel || installedModel.replace(/:latest$/, "") === selectedModel || selectedModel.replace(/:latest$/, "") === installedModel;
+}
+
+function readTelegramBridgeSettings(value: unknown): Partial<TelegramBridgeSettings> {
+  if (!isRecord(value)) return {};
+  return {
+    enabled: value.enabled === true,
+    language: value.language === "ru" ? "ru" : "en",
+    useDefaultAI: value.useDefaultAI !== false,
+    aiProvider: value.aiProvider === "openrouter" ? "openrouter" : "ollama",
+    localModel: validateModelName(value.localModel, "qwen3.5:9b"),
+    cloudModel: readOpenRouterModel(value.cloudModel),
+  };
 }
 
 function broadcast(channel: string, payload: unknown) {

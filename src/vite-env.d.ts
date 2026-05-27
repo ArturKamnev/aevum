@@ -23,6 +23,18 @@ interface Window {
     chatOpenRouter: (payload: OpenRouterRequest) => Promise<OpenRouterResult>;
     scheduleTaskNotifications: (tasks: NotificationTaskPayload[], settings: NotificationSettingsPayload) => Promise<{ ok: boolean; scheduled: number }>;
     showTestNotification: () => Promise<{ ok: boolean; supported: boolean }>;
+    getTelegramStatus: () => Promise<TelegramStatusResult>;
+    setTelegramBotToken: (token: string) => Promise<TelegramStatusResult & { ok: boolean }>;
+    disconnectTelegramBot: () => Promise<TelegramStatusResult & { ok: boolean }>;
+    unpairTelegramChat: () => Promise<TelegramStatusResult & { ok: boolean }>;
+    reconnectTelegramPolling: () => Promise<TelegramStatusResult & { ok: boolean }>;
+    updateTelegramSettings: (settings: TelegramSettingsPayload) => Promise<TelegramStatusResult>;
+    markTelegramRendererReady: () => Promise<{ ok: boolean }>;
+    sendTelegramRendererResponse: (payload: TelegramRendererResponsePayload) => Promise<{ ok: boolean }>;
+    onTelegramStatus: (callback: (payload: TelegramStatusResult) => void) => () => void;
+    onTelegramMessageRequest: (callback: (payload: TelegramMessageRequestPayload) => void) => () => void;
+    onTelegramDecisionRequest: (callback: (payload: TelegramDecisionRequestPayload) => void) => () => void;
+    onTelegramCallbackRequest: (callback: (payload: TelegramCallbackRequestPayload) => void) => () => void;
   };
 }
 
@@ -87,4 +99,74 @@ type OpenRouterResult = {
   actualModel?: string;
   message?: string;
   httpStatus?: number;
+};
+
+type TelegramBridgeStatus = "disabled" | "connecting" | "connected" | "invalid-token" | "not-paired" | "webhook-conflict" | "error";
+type TelegramInteractionMode = "template" | "ai";
+
+type TelegramStatusResult = {
+  status: TelegramBridgeStatus;
+  enabled: boolean;
+  hasToken: boolean;
+  bot?: {
+    id: number;
+    username?: string;
+    firstName?: string;
+  };
+  pairedChat?: {
+    id: number;
+    username?: string;
+    firstName?: string;
+  };
+  pairingCode?: string;
+  pairingExpiresAt?: string;
+  interactionMode: TelegramInteractionMode;
+  message?: string;
+};
+
+type TelegramSettingsPayload = {
+  enabled: boolean;
+  language: "en" | "ru";
+  useDefaultAI: boolean;
+  aiProvider: "ollama" | "openrouter";
+  localModel: string;
+  cloudModel: string;
+};
+
+type TelegramMessageRequestPayload = {
+  id: string;
+  chatId: number;
+  messageId: number;
+  text: string;
+  interactionMode: TelegramInteractionMode;
+};
+
+type TelegramDecisionRequestPayload = {
+  id: string;
+  proposalId: string;
+  decision: "confirm" | "cancel";
+  chatId: number;
+};
+
+type TelegramCallbackRequestPayload = {
+  id: string;
+  chatId: number;
+  data: string;
+  interactionMode: TelegramInteractionMode;
+};
+
+type TelegramResponseButton = {
+  text: string;
+  callbackData: string;
+};
+
+type TelegramRendererResponse =
+  | { ok: true; kind: "message"; text: string }
+  | { ok: true; kind: "buttons"; text: string; buttons: TelegramResponseButton[][] }
+  | { ok: true; kind: "proposal"; proposalId: string; text: string }
+  | { ok: false; text: string };
+
+type TelegramRendererResponsePayload = {
+  id: string;
+  response: TelegramRendererResponse;
 };

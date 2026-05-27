@@ -16,7 +16,7 @@ export type ThemeMode = "dark" | "light" | "system";
 export type TimeFormat = "24h" | "12h";
 export type AIProvider = "ollama" | "openrouter";
 export type Language = "en" | "ru";
-export type AIMode = "plan_day" | "create_tasks" | "replan_tasks";
+export type AIMode = "plan_day" | "create_tasks" | "replan_tasks" | "manage_tasks";
 export type ReminderOffsetMinutes = 0 | 5 | 10 | 30 | 60;
 
 export interface Subtask {
@@ -108,4 +108,9 @@ export interface UserSettings {
   onboardingCompleted: boolean;
   startupBehavior: "dashboard" | "today" | "last-view";
   autoPlanDay: boolean;
+  telegramAssistantEnabled: boolean;
+  telegramUseDefaultAI: boolean;
+  telegramAIProvider: AIProvider;
+  telegramLocalModel: string;
+  telegramCloudModel: string;
 }

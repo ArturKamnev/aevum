@@ -30,4 +30,32 @@ contextBridge.exposeInMainWorld("todoAI", {
   chatOpenRouter: (payload: unknown) => ipcRenderer.invoke("ai:chat-openrouter", payload),
   scheduleTaskNotifications: (tasks: unknown[], settings: unknown) => ipcRenderer.invoke("notifications:schedule", tasks, settings),
   showTestNotification: () => ipcRenderer.invoke("notifications:test"),
+  getTelegramStatus: () => ipcRenderer.invoke("telegram:get-status"),
+  setTelegramBotToken: (token: string) => ipcRenderer.invoke("telegram:set-token", token),
+  disconnectTelegramBot: () => ipcRenderer.invoke("telegram:disconnect"),
+  unpairTelegramChat: () => ipcRenderer.invoke("telegram:unpair"),
+  reconnectTelegramPolling: () => ipcRenderer.invoke("telegram:reconnect-polling"),
+  updateTelegramSettings: (settings: unknown) => ipcRenderer.invoke("telegram:update-settings", settings),
+  markTelegramRendererReady: () => ipcRenderer.invoke("telegram:renderer-ready"),
+  sendTelegramRendererResponse: (payload: unknown) => ipcRenderer.invoke("telegram:renderer-response", payload),
+  onTelegramStatus: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("telegram:status", listener);
+    return () => ipcRenderer.removeListener("telegram:status", listener);
+  },
+  onTelegramMessageRequest: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("telegram:message-request", listener);
+    return () => ipcRenderer.removeListener("telegram:message-request", listener);
+  },
+  onTelegramDecisionRequest: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("telegram:decision-request", listener);
+    return () => ipcRenderer.removeListener("telegram:decision-request", listener);
+  },
+  onTelegramCallbackRequest: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("telegram:callback-request", listener);
+    return () => ipcRenderer.removeListener("telegram:callback-request", listener);
+  },
 });

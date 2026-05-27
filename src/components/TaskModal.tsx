@@ -1,5 +1,5 @@
 import { CalendarX, Save, X } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import type { Project, ReminderOffsetMinutes, RepeatRule, RepeatUnit, Task, TaskDraft } from "../types";
 import { combineDateAndTime, getScheduleDate, getScheduleTime, getTodayISO } from "../utils/date";
@@ -42,6 +42,8 @@ const weekdayNumbers = [1, 2, 3, 4, 5, 6, 0];
 
 export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalProps) {
   const { t } = useI18n();
+  const closeTimer = useRef<number | null>(null);
+  const [isClosing, setIsClosing] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
@@ -74,6 +76,12 @@ export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalPr
     setExcludedWeekdays(repeat.excludedWeekdays);
   }, [projects, task]);
 
+  useEffect(() => () => {
+    if (closeTimer.current) {
+      window.clearTimeout(closeTimer.current);
+    }
+  }, []);
+
   const repeat = useMemo(
     () => buildRepeatRule(repeatPreset, repeatInterval, repeatUnit, repeatWeekdays, excludedWeekdays),
     [excludedWeekdays, repeatInterval, repeatPreset, repeatUnit, repeatWeekdays],
@@ -101,20 +109,26 @@ export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalPr
     });
   }
 
+  function requestClose() {
+    if (closeTimer.current) return;
+    setIsClosing(true);
+    closeTimer.current = window.setTimeout(onClose, 150);
+  }
+
   function toggleWeekday(day: number, target: "included" | "excluded") {
     const setter = target === "included" ? setRepeatWeekdays : setExcludedWeekdays;
     setter((current) => (current.includes(day) ? current.filter((item) => item !== day) : [...current, day].sort((a, b) => a - b)));
   }
 
   return (
-    <div className="confirm-overlay" role="presentation" onMouseDown={onClose}>
-      <form className="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title" onMouseDown={(event) => event.stopPropagation()} onSubmit={handleSubmit}>
+    <div className={`confirm-overlay ${isClosing ? "confirm-overlay--closing" : ""}`} role="presentation" onMouseDown={requestClose}>
+      <form className={`task-modal ${isClosing ? "task-modal--closing" : ""}`} role="dialog" aria-modal="true" aria-labelledby="task-modal-title" onMouseDown={(event) => event.stopPropagation()} onSubmit={handleSubmit}>
         <div className="task-modal__header">
           <div>
             <h2 id="task-modal-title">{mode === "create" ? t("task.newTask") : t("task.editTask")}</h2>
             <p>{t("task.modalDescription")}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label={t("settings.cancel")}>
+          <button className="icon-button" onClick={requestClose} type="button" aria-label={t("settings.cancel")}>
             <X size={16} />
           </button>
         </div>
@@ -246,7 +260,7 @@ export function TaskModal({ mode, projects, task, onClose, onSave }: TaskModalPr
         </button>
 
         <div className="confirm-dialog__actions">
-          <button className="button button--secondary" onClick={onClose} type="button">
+          <button className="button button--secondary" onClick={requestClose} type="button">
             {t("settings.cancel")}
           </button>
           <button className="button button--primary" disabled={!title.trim()} type="submit">

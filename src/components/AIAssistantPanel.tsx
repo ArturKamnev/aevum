@@ -1,8 +1,8 @@
-import { AlertTriangle, ArrowUp, Bot, CheckCircle2, ChevronDown, CornerDownLeft, Loader2, Plus, RotateCcw, Sparkles, Trash2, UserRound } from "lucide-react";
-import { FormEvent, useEffect, useRef, useState, KeyboardEvent } from "react";
+import { AlertTriangle, ArrowUp, Bot, CalendarClock, CheckCircle2, ChevronDown, Loader2, Pencil, Plus, RotateCcw, Trash2, UserRound } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState, KeyboardEvent, type ReactNode } from "react";
 import { useI18n, type TranslationKey } from "../i18n";
 import { applyAssistantAction } from "../services/aiActions";
-import { AIProviderError, chatWithAssistant, type AssistantAction } from "../services/aiService";
+import { AIProviderError, chatWithAssistant, type AssistantAction, type ManageTaskOperation } from "../services/aiService";
 import type { AIMode, AssistantMessage, Project, Task, TaskDraft, UserSettings, ViewId } from "../types";
 import { formatScheduleLabel } from "../utils/date";
 import aevumLogoDark from "../../media/aevum-logo-dark.png";
@@ -11,6 +11,8 @@ import aevumLogoLight from "../../media/aevum-logo-light.png";
 interface AIAssistantPanelProps {
   addProject: (project: Omit<Project, "id">) => Project;
   addTask: (task: TaskDraft) => Task;
+  onDeleteTask: (taskId: string) => void;
+  onSetTaskStatus: (taskId: string, status: Task["status"]) => void;
   onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   messages: AssistantMessage[];
   projects: Project[];
@@ -37,6 +39,11 @@ const modeMeta: Record<AIMode, { title: TranslationKey; description: Translation
     description: "assistant.mode.replanTasksDescription",
     placeholder: "assistant.placeholder.replanTasks",
   },
+  manage_tasks: {
+    title: "assistant.mode.manageTasks",
+    description: "assistant.mode.manageTasksDescription",
+    placeholder: "assistant.placeholder.manageTasks",
+  },
 };
 
 const openRouterModelOptions = [
@@ -53,6 +60,8 @@ const openRouterModelOptions = [
 export function AIAssistantPanel({
   addProject,
   addTask,
+  onDeleteTask,
+  onSetTaskStatus,
   onUpdateTask,
   messages,
   projects,
@@ -187,7 +196,7 @@ export function AIAssistantPanel({
     setIsThinking(true);
 
     try {
-      const result = await chatWithAssistant(originalContent, tasks, settings, activeTool);
+      const result = await chatWithAssistant(originalContent, tasks, settings, activeTool, projects);
       if (result.action) {
         setPendingAction(result.action);
       }
@@ -227,7 +236,15 @@ export function AIAssistantPanel({
   function applyPendingTasks() {
     if (!pendingAction) return;
     try {
-      const actionResult = applyAssistantAction(pendingAction, { addProject, addTask, projects, updateTask: onUpdateTask });
+      const actionResult = applyAssistantAction(pendingAction, {
+        addProject,
+        addTask,
+        deleteTask: onDeleteTask,
+        projects,
+        setTaskStatus: onSetTaskStatus,
+        tasks,
+        updateTask: onUpdateTask,
+      });
       setMessages([
         ...messages,
         {
@@ -367,6 +384,54 @@ export function AIAssistantPanel({
             </div>
           )}
 
+          {pendingAction?.type === "manage_tasks" && (
+            <div className="assistant-task-preview assistant-task-preview--manage">
+              <div className="assistant-task-preview__header">
+                <div>
+                  <strong>{t("assistant.managePreviewTitle")}</strong>
+                  <span>{t("assistant.managePreviewDescription")}</span>
+                </div>
+                <div className="assistant-task-preview__actions">
+                  <button className="button button--secondary" onClick={() => setPendingAction(null)} type="button">
+                    {t("assistant.cancelPreview")}
+                  </button>
+                  <button className="button button--primary" onClick={applyPendingTasks} type="button">
+                    <CheckCircle2 size={16} />
+                    {t("assistant.applyChanges")}
+                  </button>
+                </div>
+              </div>
+              <div className="assistant-manage-preview__list">
+                {pendingAction.operations.map((operation, index) => {
+                  const task = tasks.find((item) => item.id === operation.taskId);
+                  const isDelete = operation.operation === "delete";
+                  const Icon = isDelete ? Trash2 : operation.operation === "set_status" ? CheckCircle2 : operation.changes.scheduledAt !== undefined ? CalendarClock : Pencil;
+                  return (
+                    <article className={`assistant-manage-preview__item ${isDelete ? "assistant-manage-preview__item--danger" : ""}`} key={`${operation.operation}-${operation.taskId}-${index}`} style={{ "--index": index } as React.CSSProperties}>
+                      <div className="assistant-manage-preview__icon">
+                        <Icon size={16} />
+                      </div>
+                      <div className="assistant-manage-preview__content">
+                        <div className="assistant-manage-preview__title">
+                          <strong>{task?.title ?? t("assistant.taskUnavailable")}</strong>
+                          <span>{getManageOperationLabel(operation.operation, t)}</span>
+                        </div>
+                        {task ? (
+                          <div className="assistant-manage-preview__changes">
+                            {renderManageOperationChanges(operation, task, projects, scheduleLabels, language, settings.timeFormat, t)}
+                          </div>
+                        ) : (
+                          <p>{t("assistant.taskUnavailableDescription")}</p>
+                        )}
+                        {operation.reason ? <p>{operation.reason}</p> : null}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {pendingRetry && (
             <div className="assistant-error-strip">
               <AlertTriangle size={16} />
@@ -402,7 +467,7 @@ export function AIAssistantPanel({
                   <>
                     <div className="composer-dropdown-backdrop" onClick={() => setShowToolsDropdown(false)} />
                     <div className="composer-tool-dropdown">
-                      {(["create_tasks", "plan_day"] as AIMode[]).map((item) => (
+                      {(["create_tasks", "plan_day", "manage_tasks"] as AIMode[]).map((item) => (
                         <button
                           className={`composer-tool-item ${activeTool === item ? "composer-tool-item--active" : ""}`}
                           key={item}
@@ -819,7 +884,78 @@ function normalizeAIError(error: unknown, t: (key: TranslationKey) => string) {
 
 function getAppliedMessage(action: AssistantAction, t: (key: TranslationKey) => string) {
   if (action.type === "schedule_tasks") return t("assistant.planApplied");
+  if (action.type === "manage_tasks") return t("assistant.changesApplied");
   return t("assistant.tasksCreated");
+}
+
+function getManageOperationLabel(operation: ManageTaskOperation["operation"], t: (key: TranslationKey) => string) {
+  if (operation === "delete") return t("assistant.manageDelete");
+  if (operation === "set_status") return t("assistant.manageStatus");
+  return t("assistant.manageUpdate");
+}
+
+function renderManageOperationChanges(
+  operation: ManageTaskOperation,
+  task: Task,
+  projects: Project[],
+  scheduleLabels: { noDate: string; overdue: string; today: string; tomorrow: string },
+  language: UserSettings["language"],
+  timeFormat: UserSettings["timeFormat"],
+  t: (key: TranslationKey) => string,
+) {
+  if (operation.operation === "delete") {
+    return (
+      <span className="assistant-manage-preview__line assistant-manage-preview__line--danger">
+        {t("assistant.manageDeleteWarning")} {formatScheduleLabel(task.scheduledAt, scheduleLabels, language, timeFormat)}
+      </span>
+    );
+  }
+
+  if (operation.operation === "set_status") {
+    return (
+      <span className="assistant-manage-preview__line">
+        {formatStatus(task.status, t)} -&gt; {formatStatus(operation.status, t)}
+      </span>
+    );
+  }
+
+  const rows: ReactNode[] = [];
+  const changes = operation.changes;
+  const pushRow = (key: string, label: string, before: string, after: string) => {
+    rows.push(
+      <span className="assistant-manage-preview__line" key={key}>
+        <b>{label}</b>
+        <span>{before || t("assistant.emptyValue")} -&gt; {after || t("assistant.emptyValue")}</span>
+      </span>,
+    );
+  };
+
+  if (changes.title !== undefined) pushRow("title", t("task.title"), task.title, changes.title);
+  if (changes.description !== undefined) pushRow("description", t("task.description"), task.description, changes.description);
+  if (changes.scheduledAt !== undefined) {
+    pushRow("scheduledAt", t("settings.schedule"), formatScheduleLabel(task.scheduledAt, scheduleLabels, language, timeFormat), formatScheduleLabel(changes.scheduledAt, scheduleLabels, language, timeFormat));
+  }
+  if (changes.durationMinutes !== undefined) pushRow("duration", t("task.duration"), formatDurationPreview(task.durationMinutes, t), formatDurationPreview(changes.durationMinutes, t));
+  if (changes.reminderMinutes !== undefined) pushRow("reminder", t("task.reminder"), formatReminderPreview(task.reminderMinutes, t), formatReminderPreview(changes.reminderMinutes, t));
+  if (changes.projectId !== undefined) pushRow("project", t("task.project"), formatProjectName(task.projectId, projects, t), formatProjectName(changes.projectId, projects, t));
+
+  return rows;
+}
+
+function formatStatus(status: Task["status"], t: (key: TranslationKey) => string) {
+  return status === "completed" ? t("task.completed") : t("task.active");
+}
+
+function formatDurationPreview(value: number | null, t: (key: TranslationKey) => string) {
+  return value ? `${value} min` : t("task.noDuration");
+}
+
+function formatReminderPreview(value: number | null, t: (key: TranslationKey) => string) {
+  return value === null ? t("task.reminderDefault") : formatReminder(value, t);
+}
+
+function formatProjectName(projectId: string, projects: Project[], t: (key: TranslationKey) => string) {
+  return projects.find((project) => project.id === projectId)?.name ?? t("task.project");
 }
 
 function formatReminder(value: number, t: (key: TranslationKey) => string) {
