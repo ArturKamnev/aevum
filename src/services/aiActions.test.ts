@@ -12,6 +12,7 @@ import {
 } from "./aiActions";
 import type { AssistantAction } from "./aiService";
 import type { Project, Task } from "../types";
+import { aevumCategoryPalette } from "../utils/categoryColors";
 import { defaultRepeat } from "../utils/recurrence";
 
 const now = "2026-05-28T09:00:00.000Z";
@@ -334,8 +335,30 @@ describe("AI action protection foundation", () => {
     if (!result.ok) return;
     const addedProj = result.transaction.after.projects.find(p => p.name === "Health");
     expect(addedProj).toBeDefined();
+    expect(aevumCategoryPalette).toContain(addedProj?.color);
     const workoutTask = result.transaction.after.tasks.find(t => t.title === "Workout");
     expect(workoutTask?.projectId).toBe(addedProj?.id);
+  });
+
+  it("assigns varied safe colors to AI-created categories", () => {
+    const state = baseState();
+    const result = buildAIActionTransaction({
+      type: "batch_action",
+      categoriesToCreate: [
+        { ref: "health", name: "Health" },
+        { ref: "finance", name: "Finance" },
+        { ref: "study", name: "Study" },
+      ],
+    }, "assistant", state, { now, idFactory: idFactory() });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const createdColors = result.transaction.after.projects
+      .filter((projectItem) => ["Health", "Finance", "Study"].includes(projectItem.name))
+      .map((projectItem) => projectItem.color);
+    expect(createdColors).toHaveLength(3);
+    expect(new Set(createdColors).size).toBe(3);
+    createdColors.forEach((color) => expect(aevumCategoryPalette).toContain(color));
   });
 
   it("prevents creating duplicate categories case-insensitively and space-normalized", () => {

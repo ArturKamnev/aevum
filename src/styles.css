@@ -22,6 +22,11 @@
   --project-sage: oklch(0.67 0.08 154);
   --project-clay: oklch(0.67 0.095 47);
   --project-ink: oklch(0.68 0.08 252);
+  --project-mint: oklch(0.7 0.1 178);
+  --project-sky: oklch(0.69 0.095 228);
+  --project-violet: oklch(0.68 0.095 292);
+  --project-rose: oklch(0.68 0.105 18);
+  --project-gold: oklch(0.74 0.105 92);
 }
 
 :root[data-theme="dark"] {
@@ -750,6 +755,19 @@ kbd {
 
 .task-toolbar--compact {
   grid-template-columns: minmax(220px, 1fr) 132px 132px;
+}
+
+.task-toolbar--category {
+  grid-template-columns: minmax(220px, 1fr) 132px max-content 132px;
+}
+
+.task-toolbar__date-filter {
+  align-self: stretch;
+}
+
+.task-toolbar__date-filter .segmented-control__item {
+  min-height: 38px;
+  white-space: nowrap;
 }
 
 .task-list-panel__title {

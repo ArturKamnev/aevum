@@ -34,7 +34,8 @@ import {
 } from "./services/aiActionAuditStore";
 import { AIProviderError, breakDownTaskWithAI, chatWithAssistant, getCleanLocalizedErrorMessage, type AssistantAction } from "./services/aiService";
 import { loadProjects, loadTasks, saveProjects, saveTasks } from "./services/localStore";
-import type { AIMode, AssistantMessage, Project, ReminderOffsetMinutes, SortMode, Task, TaskDraft, TaskStatus, UserSettings, ViewId } from "./types";
+import type { AIMode, AssistantMessage, CategoryDateFilter, Project, ReminderOffsetMinutes, SortMode, Task, TaskDraft, TaskStatus, UserSettings, ViewId } from "./types";
+import { assignCategoryColor, isAevumCategoryColor } from "./utils/categoryColors";
 import { formatScheduleLabel, getTodayISO, getTomorrowISO, isScheduledAfterToday, isScheduledBeforeToday, isScheduledToday } from "./utils/date";
 import { createProjectId, createTaskId } from "./utils/id";
 import { getCategoryIdFromView } from "./utils/navigation";
@@ -106,9 +107,11 @@ export function App() {
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [taskPendingDelete, setTaskPendingDelete] = useState<Task | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [categoryDateFilter, setCategoryDateFilter] = useState<CategoryDateFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("deadline");
   const [isLoading] = useState(false);
   const tasksRef = useRef(tasks);
@@ -120,7 +123,6 @@ export function App() {
   const telegramTemplateWizardsRef = useRef(new Map<number, TelegramTemplateWizard>());
   const activeCategoryId = getCategoryIdFromView(activeView);
   const activeCategory = activeCategoryId ? appProjects.find((project) => project.id === activeCategoryId) : undefined;
-  const activeCategoryTaskCount = activeCategoryId ? tasks.filter((task) => task.projectId === activeCategoryId).length : 0;
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -169,6 +171,15 @@ export function App() {
   }, [activeCategory, activeCategoryId]);
 
   useEffect(() => {
+    if (taskPendingDelete && !tasks.some((task) => task.id === taskPendingDelete.id)) {
+      setTaskPendingDelete(null);
+    }
+    if (editingTask && !tasks.some((task) => task.id === editingTask.id)) {
+      setEditingTask(null);
+    }
+  }, [editingTask, taskPendingDelete, tasks]);
+
+  useEffect(() => {
     void window.todoAI?.scheduleTaskNotifications(tasks, {
       enabled: settings.notifications,
       defaultReminderMinutes: settings.defaultReminderMinutes,
@@ -203,6 +214,7 @@ export function App() {
   const addProject = useCallback((project: Omit<Project, "id">) => {
     const newProject = {
       ...project,
+      color: isAevumCategoryColor(project.color) ? project.color : assignCategoryColor(projectsRef.current),
       id: createProjectId(),
     };
     setAppProjects((currentProjects) => [...currentProjects, newProject]);
@@ -254,14 +266,15 @@ export function App() {
 
   const deleteTaskDirect = useCallback((taskId: string) => {
     setTasks((currentTasks) => currentTasks.filter((task) => task.id !== taskId));
+    setEditingTask((currentTask) => (currentTask?.id === taskId ? null : currentTask));
+    setTaskPendingDelete((currentTask) => (currentTask?.id === taskId ? null : currentTask));
   }, []);
 
   const deleteTask = useCallback((taskId: string) => {
     const task = tasks.find((item) => item.id === taskId);
-    const message = task ? `${t("task.confirmDelete")} "${task.title}"?` : t("task.confirmDelete");
-    if (!window.confirm(message)) return;
-    deleteTaskDirect(taskId);
-  }, [deleteTaskDirect, tasks, t]);
+    if (!task) return;
+    setTaskPendingDelete(task);
+  }, [tasks]);
 
   const toggleSubtask = useCallback((taskId: string, subtaskId: string) => {
     setTasks((currentTasks) =>
@@ -743,11 +756,12 @@ export function App() {
             tasks={tasks}
             categoryFilter={activeCategory.id}
             setCategoryFilter={setCategoryFilter}
+            categoryDateFilter={categoryDateFilter}
+            setCategoryDateFilter={setCategoryDateFilter}
             timeFormat={settings.timeFormat}
             viewMode="category"
             activeCategory={activeCategory}
             hideCategoryFilter
-            totalCount={activeCategoryTaskCount}
           />
         )}
 
@@ -835,6 +849,27 @@ export function App() {
             setEditingTask(null);
           }}
         />
+      )}
+
+      {taskPendingDelete && (
+        <div className="confirm-overlay" role="presentation" onMouseDown={() => setTaskPendingDelete(null)}>
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-task-title" onMouseDown={(event) => event.stopPropagation()}>
+            <h2 id="delete-task-title">{t("task.confirmDelete")}</h2>
+            <p>{taskPendingDelete.title}</p>
+            <div className="confirm-dialog__actions">
+              <button className="button button--secondary" onClick={() => setTaskPendingDelete(null)} type="button">
+                {t("settings.cancel")}
+              </button>
+              <button className="button button--danger" onClick={() => {
+                const taskId = taskPendingDelete.id;
+                setTaskPendingDelete(null);
+                deleteTaskDirect(taskId);
+              }} type="button">
+                {t("task.delete")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );
@@ -1351,7 +1386,7 @@ function ProjectsView({
     onAddProject({
       name,
       description: "",
-      color: "var(--project-sage)",
+      color: assignCategoryColor(projects),
     });
     setNewCategoryName("");
   }

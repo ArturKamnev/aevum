@@ -13,6 +13,7 @@ import type {
   ScheduleTasksAction,
 } from "./aiService";
 import type { Project, ReminderOffsetMinutes, RepeatRule, Task } from "../types";
+import { assignCategoryColor } from "../utils/categoryColors";
 import { getScheduleTime, normalizeScheduledAt } from "../utils/date";
 import { createProjectId, createTaskId } from "../utils/id";
 import { calculateNextRepeatAt, createNextRecurringTask, defaultRepeat, normalizeRepeat } from "../utils/recurrence";
@@ -401,7 +402,7 @@ export function buildAIActionTransaction(
           id,
           name: cat.name,
           description: "Created by Aevum.",
-          color: "var(--project-sage)",
+          color: assignCategoryColor(workingProjects),
         };
         workingProjects.push(newProject);
         createdProjectIds.push(id);
@@ -1102,7 +1103,7 @@ function resolveProjectForDraft(
     id: createUniqueProjectId(projectIds, idFactory),
     name: draft.projectName,
     description: "Created by Aevum.",
-    color: "var(--project-sage)",
+    color: assignCategoryColor(projects),
   };
   projects.push(project);
   createdProjectIds.push(project.id);

@@ -12,6 +12,7 @@ export type CategoryViewId = `category:${string}`;
 export type ViewId = MainViewId | CategoryViewId;
 
 export type TaskStatus = "active" | "completed";
+export type CategoryDateFilter = "today" | "tomorrow" | "week" | "all";
 export type RepeatType = "daily" | "weekly" | "monthly" | "custom";
 export type RepeatUnit = "day" | "week" | "month";
 export type SortMode = "deadline" | "status";

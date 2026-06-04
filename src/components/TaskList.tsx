@@ -3,8 +3,8 @@ import { useMemo } from "react";
 import { EmptyState } from "./EmptyState";
 import { TaskCard } from "./TaskCard";
 import { useI18n } from "../i18n";
-import type { Project, SortMode, Task, TaskStatus, TimeFormat } from "../types";
-import { compareScheduledAt, formatScheduleLabel, getRelativeDateLabel, getScheduleDate } from "../utils/date";
+import type { CategoryDateFilter, Project, SortMode, Task, TaskStatus, TimeFormat } from "../types";
+import { compareScheduledAt, formatScheduleLabel, getRelativeDateLabel, getScheduleDate, getTodayISO, getTomorrowISO } from "../utils/date";
 
 interface TaskListProps {
   tasks: Task[];
@@ -15,6 +15,8 @@ interface TaskListProps {
   setStatusFilter: (status: TaskStatus | "all") => void;
   categoryFilter: string;
   setCategoryFilter: (projectId: string) => void;
+  categoryDateFilter?: CategoryDateFilter;
+  setCategoryDateFilter?: (filter: CategoryDateFilter) => void;
   sortMode: SortMode;
   setSortMode: (mode: SortMode) => void;
   onToggleTask: (taskId: string) => void;
@@ -31,14 +33,16 @@ interface TaskListProps {
 }
 
 const statusScore: Record<TaskStatus, number> = { active: 0, completed: 1 };
+const categoryDateFilters: CategoryDateFilter[] = ["today", "tomorrow", "week", "all"];
 
 export function filterAndSortTasks({
   tasks,
   query,
   statusFilter,
   categoryFilter,
+  categoryDateFilter = "all",
   sortMode,
-}: Pick<TaskListProps, "tasks" | "query" | "statusFilter" | "categoryFilter" | "sortMode">) {
+}: Pick<TaskListProps, "tasks" | "query" | "statusFilter" | "categoryFilter" | "sortMode"> & { categoryDateFilter?: CategoryDateFilter }) {
   const normalizedQuery = query.trim().toLowerCase();
 
   return tasks
@@ -50,7 +54,8 @@ export function filterAndSortTasks({
         task.tags.some((tag) => tag.toLowerCase().includes(normalizedQuery));
       const matchesStatus = statusFilter === "all" || task.status === statusFilter;
       const matchesCategory = categoryFilter === "all" || task.projectId === categoryFilter;
-      return matchesQuery && matchesStatus && matchesCategory;
+      const matchesCategoryDate = categoryFilter === "all" || categoryDateFilter === "all" || isInCategoryDateFilter(task, categoryDateFilter);
+      return matchesQuery && matchesStatus && matchesCategory && matchesCategoryDate;
     })
     .sort((a, b) => {
       if (sortMode === "status") return statusScore[a.status] - statusScore[b.status];
@@ -69,6 +74,8 @@ export function TaskList(props: TaskListProps) {
     setStatusFilter,
     categoryFilter,
     setCategoryFilter,
+    categoryDateFilter = "all",
+    setCategoryDateFilter,
     sortMode,
     setSortMode,
     onToggleTask,
@@ -85,8 +92,8 @@ export function TaskList(props: TaskListProps) {
   } = props;
 
   const visibleTasks = useMemo(
-    () => filterAndSortTasks({ tasks, query, statusFilter, categoryFilter, sortMode }),
-    [categoryFilter, query, sortMode, statusFilter, tasks],
+    () => filterAndSortTasks({ tasks, query, statusFilter, categoryFilter, categoryDateFilter, sortMode }),
+    [categoryDateFilter, categoryFilter, query, sortMode, statusFilter, tasks],
   );
   const scheduleLabels = { noDate: t("date.noDate"), overdue: t("date.overdue"), today: t("date.today"), tomorrow: t("date.tomorrow") };
   const upcomingGroups = useMemo(() => {
@@ -127,7 +134,7 @@ export function TaskList(props: TaskListProps) {
         <SlidersHorizontal size={18} />
       </div>
 
-      <div className={`task-toolbar ${hideCategoryFilter ? "task-toolbar--compact" : ""}`}>
+      <div className={`task-toolbar ${hideCategoryFilter ? "task-toolbar--compact" : ""} ${viewMode === "category" ? "task-toolbar--category" : ""}`}>
         <label className="search-field">
           <Search size={17} />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("task.searchPlaceholder")} />
@@ -147,6 +154,20 @@ export function TaskList(props: TaskListProps) {
             ))}
           </select>
         )}
+        {viewMode === "category" && setCategoryDateFilter ? (
+          <div className="segmented-control task-toolbar__date-filter" role="group" aria-label={t("task.categoryDateFilter")}>
+            {categoryDateFilters.map((filter) => (
+              <button
+                className={`segmented-control__item ${categoryDateFilter === filter ? "segmented-control__item--active" : ""}`}
+                key={filter}
+                onClick={() => setCategoryDateFilter(filter)}
+                type="button"
+              >
+                {getCategoryDateFilterLabel(filter, t)}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)}>
           <option value="deadline">{t("task.sort.deadline")}</option>
           <option value="status">{t("task.sort.status")}</option>
@@ -157,8 +178,10 @@ export function TaskList(props: TaskListProps) {
         {visibleTasks.length === 0 ? (
           <EmptyState
             icon={Search}
-            title={t("task.noMatch")}
-            description={t("task.noMatchDescription")}
+            title={viewMode === "category" && activeCategory ? t("task.noCategoryDateMatch") : t("task.noMatch")}
+            description={viewMode === "category" && activeCategory
+              ? `${activeCategory.name} - ${getCategoryDateFilterLabel(categoryDateFilter, t)}. ${t("task.categoryDateEmptyDescription")}`
+              : t("task.noMatchDescription")}
           />
         ) : viewMode === "upcoming" ? (
           <div className="upcoming-timeline">
@@ -181,4 +204,33 @@ export function TaskList(props: TaskListProps) {
       </div>
     </section>
   );
+}
+
+function isInCategoryDateFilter(task: Task, filter: CategoryDateFilter) {
+  const date = getScheduleDate(task.scheduledAt);
+  if (!date) return false;
+  if (filter === "today") return date === getTodayISO();
+  if (filter === "tomorrow") return date === getTomorrowISO();
+  if (filter === "week") {
+    const today = getTodayISO();
+    const weekEnd = getOffsetDateISO(6);
+    return date >= today && date <= weekEnd;
+  }
+  return true;
+}
+
+function getCategoryDateFilterLabel(filter: CategoryDateFilter, t: ReturnType<typeof useI18n>["t"]) {
+  if (filter === "today") return t("task.dateFilter.today");
+  if (filter === "tomorrow") return t("task.dateFilter.tomorrow");
+  if (filter === "week") return t("task.dateFilter.week");
+  return t("task.dateFilter.all");
+}
+
+function getOffsetDateISO(days: number) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }

@@ -1,5 +1,6 @@
 import { projects as seedProjects } from "../data/sampleData";
 import type { Project, ReminderOffsetMinutes, Task } from "../types";
+import { defaultCategoryColor } from "../utils/categoryColors";
 import { normalizeScheduledAt } from "../utils/date";
 import { createSubtaskId, createTaskId } from "../utils/id";
 import { calculateNextRepeatAt, migrateLegacyRepeat, normalizeRepeat } from "../utils/recurrence";
@@ -9,7 +10,7 @@ const projectsStorageKey = "todo-ai-projects-v1";
 const uncategorizedProject: Project = {
   id: "uncategorized",
   name: "Uncategorized",
-  color: "var(--project-sage)",
+  color: defaultCategoryColor,
   description: "Tasks without a category.",
 };
 
@@ -144,7 +145,7 @@ function migrateProject(value: unknown): Project | undefined {
   return {
     id: value.id,
     name: value.name,
-    color: typeof value.color === "string" ? value.color : "var(--project-sage)",
+    color: typeof value.color === "string" ? value.color : defaultCategoryColor,
     description: typeof value.description === "string" ? value.description : "",
   };
 }
