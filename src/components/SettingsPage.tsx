@@ -628,7 +628,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
           <summary><KeyRound size={15} />{t("settings.mcpConnectedClients")}</summary>
           <div>
             {(aevumConnectStatus?.clients ?? []).length ? (aevumConnectStatus?.clients ?? []).map((client) => <div className="mcp-client-row" key={client.clientId}>
-              <span><strong>{client.name}</strong><small>{client.scopes.join(" ")}</small></span>
+              <span><strong>{client.name}</strong><small>{client.scopes.join(" ")}{client.lastUsedAt ? ` · ${t("settings.mcpLastUsed")}: ${client.lastUsedAt}` : ""}</small></span>
               <button className="button button--secondary" onClick={() => void revokeAevumConnectClient(client.clientId)} type="button">{t("settings.mcpRevokeClient")}</button>
             </div>) : <p>{t("settings.mcpNoConnectedClients")}</p>}
             {(aevumConnectStatus?.clients ?? []).length ? <button className="button button--secondary" onClick={() => void revokeAllAevumConnectClients()} type="button">{t("settings.mcpRevokeAll")}</button> : null}
@@ -645,6 +645,8 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             <div><dt>{t("settings.mcpOAuthStage")}</dt><dd>{aevumConnectStatus?.oauthDiagnostics?.lastOAuthStage || "—"}</dd></div>
             <div><dt>{t("settings.mcpLastOAuthError")}</dt><dd>{aevumConnectStatus?.oauthDiagnostics?.lastTokenError || "—"}</dd></div>
             <div><dt>{t("settings.mcpGrantedScopes")}</dt><dd>{(aevumConnectStatus?.clients ?? []).flatMap((client) => client.scopes).filter((scope, index, all) => all.indexOf(scope) === index).join(" ") || t("settings.mcpNoActiveGrant")}</dd></div>
+            <div><dt>{t("settings.mcpPersistentGrant")}</dt><dd>{aevumConnectStatus?.oauthDiagnostics?.persistentGrantExists ? t("settings.mcpYes") : t("settings.mcpNo")}</dd></div>
+            <div><dt>{t("settings.mcpLastRefreshStatus")}</dt><dd>{aevumConnectStatus?.oauthDiagnostics?.refreshRotationSuccess === undefined ? "—" : aevumConnectStatus.oauthDiagnostics.refreshRotationSuccess ? t("settings.mcpRefreshSucceeded") : t("settings.mcpRefreshFailed")}</dd></div>
           </dl>
         </details> : null}
         <details className="mcp-security-details">

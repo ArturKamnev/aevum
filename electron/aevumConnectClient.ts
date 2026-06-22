@@ -24,7 +24,7 @@ export type AevumConnectStatus = {
   oauthDiagnostics?: AevumConnectOAuthDiagnostics;
 };
 export type AevumConnectAuthorizedClient = { clientId: string; name: string; scopes: string[]; createdAt: string; lastUsedAt?: string };
-export type AevumConnectOAuthDiagnostics = { lastOAuthStage?: string; lastTokenError?: string; grantFound?: boolean; refreshRotationSuccess?: boolean; updatedAt?: string };
+export type AevumConnectOAuthDiagnostics = { lastOAuthStage?: string; lastTokenError?: string; grantFound?: boolean; persistentGrantExists?: boolean; refreshRotationSuccess?: boolean; updatedAt?: string };
 
 export type AevumConnectSettings = { enabled: boolean; relayOrigin: string; accessMode: AevumConnectAccessMode; provisionIdentity?: boolean };
 export type AevumConnectDependencies = {

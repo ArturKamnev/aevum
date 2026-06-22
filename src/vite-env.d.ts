@@ -242,6 +242,6 @@ type AevumConnectStatusResult = {
   connectorUrlAvailable: boolean;
   message?: string;
   clients?: AevumConnectAuthorizedClient[];
-  oauthDiagnostics?: { lastOAuthStage?: string; lastTokenError?: string; grantFound?: boolean; refreshRotationSuccess?: boolean; updatedAt?: string };
+  oauthDiagnostics?: { lastOAuthStage?: string; lastTokenError?: string; grantFound?: boolean; persistentGrantExists?: boolean; refreshRotationSuccess?: boolean; updatedAt?: string };
 };
 type AevumConnectAuthorizedClient = { clientId: string; name: string; scopes: string[]; createdAt: string; lastUsedAt?: string };

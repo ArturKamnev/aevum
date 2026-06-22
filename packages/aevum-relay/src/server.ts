@@ -5,13 +5,13 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { RelayConfig } from "./config.js";
 import type { RelayDatabase } from "./database.js";
 import { accessModeSchema, desktopMessageSchema, isAccessModeExpansion, scopesForMode, type AccessMode, type RelayMessage } from "./protocol.js";
-import { hashSecret, randomToken, safeHashEqual, signAccessToken, verifyAccessToken, verifyPkceS256 } from "./security.js";
+import { hashSecret, randomToken, safeHashEqual, signAccessToken, verifyAccessTokenDetailed, verifyPkceS256 } from "./security.js";
 
 const mcpTimeoutMs = 12_000;
 const approvalTimeoutMs = 3 * 60_000;
 const codeTtlMs = 2 * 60_000;
 const sessionTtlMs = 10 * 60_000;
-const accessTokenTtlMs = 15 * 60_000;
+const accessTokenTtlMs = 60 * 60_000;
 const refreshTokenFamilyTtlMs = 60 * 24 * 60 * 60_000;
 const maxHttpBodyBytes = 512 * 1024;
 
@@ -116,13 +116,13 @@ async function listDeviceClients(request: IncomingMessage, response: ServerRespo
   sendJson(response, 200, {
     clients: result.rows.map((row) => ({ clientId: row.client_id, name: row.client_name, scopes: row.scopes, createdAt: row.created_at, lastUsedAt: row.last_used_at })),
     count: result.rowCount ?? 0,
-    diagnostics: diagnostics ? { lastOAuthStage: diagnostics.last_oauth_stage, lastTokenError: diagnostics.last_token_error, grantFound: diagnostics.grant_found, refreshRotationSuccess: diagnostics.last_refresh_rotation_success, updatedAt: diagnostics.updated_at } : undefined,
+    diagnostics: diagnostics ? { lastOAuthStage: diagnostics.last_oauth_stage, lastTokenError: diagnostics.last_token_error, grantFound: diagnostics.grant_found, persistentGrantExists: (result.rowCount ?? 0) > 0, refreshRotationSuccess: diagnostics.last_refresh_rotation_success, updatedAt: diagnostics.updated_at } : { persistentGrantExists: (result.rowCount ?? 0) > 0 },
   });
 }
 
 async function revokeDeviceClient(request: IncomingMessage, response: ServerResponse, context: RouteContext, devicePublicId: string, clientId: string) {
   if (!await authenticateDeviceRequest(request, response, context, devicePublicId)) return;
-  await context.database.query("UPDATE oauth_grants SET revoked_at=NOW() WHERE device_public_id=$1 AND client_id=$2 AND revoked_at IS NULL", [devicePublicId, clientId]);
+  await context.database.query("UPDATE oauth_grants SET revoked_at=NOW(),token_version=token_version+1 WHERE device_public_id=$1 AND client_id=$2 AND revoked_at IS NULL", [devicePublicId, clientId]);
   await context.database.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE grant_id IN (SELECT grant_id FROM oauth_grants WHERE device_public_id=$1 AND client_id=$2)", [devicePublicId, clientId]);
   context.hub.notifyClientRevoked(devicePublicId, clientId);
   sendJson(response, 200, { revoked: true, clientId });
@@ -130,7 +130,7 @@ async function revokeDeviceClient(request: IncomingMessage, response: ServerResp
 
 async function revokeAllDeviceClients(request: IncomingMessage, response: ServerResponse, context: RouteContext, devicePublicId: string) {
   if (!await authenticateDeviceRequest(request, response, context, devicePublicId)) return;
-  await context.database.query("UPDATE oauth_grants SET revoked_at=NOW() WHERE device_public_id=$1 AND revoked_at IS NULL", [devicePublicId]);
+  await context.database.query("UPDATE oauth_grants SET revoked_at=NOW(),token_version=token_version+1 WHERE device_public_id=$1 AND revoked_at IS NULL", [devicePublicId]);
   await context.database.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE grant_id IN (SELECT grant_id FROM oauth_grants WHERE device_public_id=$1)", [devicePublicId]);
   context.hub.notifyClientRevoked(devicePublicId);
   sendJson(response, 200, { revoked: true, all: true });
@@ -174,6 +174,7 @@ async function registerClient(request: IncomingMessage, response: ServerResponse
   const clientId = randomToken(24);
   const clientName = typeof body.client_name === "string" ? body.client_name.slice(0, 300) : "MCP client";
   await context.database.query("INSERT INTO oauth_clients(client_id,client_name,redirect_uris) VALUES($1,$2,$3::jsonb)", [clientId, clientName, JSON.stringify(body.redirect_uris)]);
+  log("info", "oauth_client_registered", { clientIdSuffix: clientId.slice(-6) });
   sendJson(response, 201, {
     client_id: clientId, client_id_issued_at: Math.floor(Date.now() / 1000), client_name: clientName,
     redirect_uris: body.redirect_uris, token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
@@ -203,7 +204,10 @@ async function authorize(_request: IncomingMessage, response: ServerResponse, co
   }
   const allowed = scopesForMode(device.access_mode);
   const requested = (url.searchParams.get("scope")?.split(/\s+/).filter(Boolean) ?? allowed);
-  if (!requested.includes("mcp:read") || requested.some((scope) => !allowed.includes(scope))) return redirectOAuthError(response, redirectUri, state, "invalid_scope");
+  if (!requested.includes("mcp:read") || requested.some((scope) => !allowed.includes(scope))) {
+    log("warn", "oauth_authorize_rejected", { reason: "invalid_scope", deviceIdSuffix: devicePublicId.slice(-6), clientIdSuffix: clientId.slice(-6) });
+    return redirectOAuthError(response, redirectUri, state, "invalid_scope");
+  }
 
   const grant = (await context.database.query("SELECT * FROM oauth_grants WHERE device_public_id=$1 AND client_id=$2 AND revoked_at IS NULL", [devicePublicId, clientId])).rows[0];
   await updateOAuthDiagnostics(context.database, devicePublicId, { stage: grant ? "grant_reuse_checked" : "grant_creation_required", grantFound: Boolean(grant) });
@@ -287,10 +291,12 @@ async function exchangeAuthorizationCode(response: ServerResponse, context: Rout
   const redirectUri = form.get("redirect_uri") ?? "";
   const verifier = form.get("code_verifier") ?? "";
   const client = await context.database.connect();
+  let devicePublicId: string | undefined;
   try {
     await client.query("BEGIN");
     const row = (await client.query("SELECT * FROM authorization_codes WHERE code_hash=$1 FOR UPDATE", [hashSecret(code, context.config.tokenSecret)])).rows[0];
     if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now() || row.client_id !== clientId || row.redirect_uri !== redirectUri || !verifyPkceS256(verifier, row.code_challenge)) throw new Error("invalid_grant");
+    devicePublicId = row.device_public_id;
     await client.query("UPDATE authorization_codes SET consumed_at=NOW() WHERE code_hash=$1", [row.code_hash]);
     const grantId = randomToken(24);
     const grant = (await client.query(
@@ -300,9 +306,12 @@ async function exchangeAuthorizationCode(response: ServerResponse, context: Rout
     const tokens = await createTokenPair(client, context.config, grant, randomToken(24));
     await client.query("COMMIT");
     sendJson(response, 200, tokens);
+    log("info", "oauth_authorization_code_exchanged", { deviceIdSuffix: grant.device_public_id.slice(-6), clientIdSuffix: clientId.slice(-6), scopes: grant.scopes });
     void updateOAuthDiagnostics(context.database, grant.device_public_id, { stage: "authorization_code_exchanged", tokenError: null }).catch(() => undefined);
-  } catch {
+  } catch (error) {
     await client.query("ROLLBACK");
+    log("warn", "oauth_authorization_code_rejected", { reason: safeOAuthReason(error), clientIdSuffix: clientId.slice(-6) });
+    if (devicePublicId) void updateOAuthDiagnostics(context.database, devicePublicId, { stage: "authorization_code_rejected", tokenError: "invalid_grant" }).catch(() => undefined);
     sendOAuthError(response, 400, "invalid_grant", "Invalid or expired authorization code.");
   } finally { client.release(); }
 }
@@ -312,14 +321,19 @@ async function exchangeRefreshToken(response: ServerResponse, context: RouteCont
   const clientId = form.get("client_id") ?? "";
   const hash = hashSecret(raw, context.config.tokenSecret);
   const client = await context.database.connect();
+  let token: Record<string, any> | undefined;
   try {
     await client.query("BEGIN");
-    const token = (await client.query("SELECT r.*,g.device_public_id,g.client_id,g.scopes,g.revoked_at AS grant_revoked_at FROM refresh_tokens r JOIN oauth_grants g ON g.grant_id=r.grant_id WHERE r.token_hash=$1 FOR UPDATE", [hash])).rows[0];
-    if (!token || (clientId && token.client_id !== clientId) || token.revoked_at || token.grant_revoked_at || new Date(token.expires_at).getTime() <= Date.now() || new Date(token.family_expires_at).getTime() <= Date.now()) throw new Error("invalid_grant");
+    token = (await client.query("SELECT r.*,g.device_public_id,g.client_id,g.scopes,g.token_version,g.revoked_at AS grant_revoked_at,d.revoked_at AS device_revoked_at FROM refresh_tokens r JOIN oauth_grants g ON g.grant_id=r.grant_id JOIN relay_devices d ON d.device_public_id=g.device_public_id JOIN oauth_clients c ON c.client_id=g.client_id WHERE r.token_hash=$1 FOR UPDATE", [hash])).rows[0];
+    if (!token) throw new Error("refresh_token_missing");
+    if (clientId && token.client_id !== clientId) throw new Error("client_mismatch");
+    if (token.revoked_at || token.grant_revoked_at || token.device_revoked_at) throw new Error("grant_revoked");
+    if (new Date(token.expires_at).getTime() <= Date.now() || new Date(token.family_expires_at).getTime() <= Date.now()) throw new Error("refresh_token_expired");
     if (token.consumed_at) {
       await client.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE family_id=$1", [token.family_id]);
-      await client.query("UPDATE oauth_grants SET revoked_at=NOW() WHERE grant_id=$1", [token.grant_id]);
+      await client.query("UPDATE oauth_grants SET revoked_at=NOW(),token_version=token_version+1 WHERE grant_id=$1", [token.grant_id]);
       await client.query("COMMIT");
+      log("warn", "oauth_refresh_token_reuse", { deviceIdSuffix: token.device_public_id.slice(-6), clientIdSuffix: token.client_id.slice(-6), familyRevoked: true });
       void updateOAuthDiagnostics(context.database, token.device_public_id, { stage: "refresh_token_reuse_rejected", tokenError: "refresh_token_reused", refreshRotationSuccess: false }).catch(() => undefined);
       return sendOAuthError(response, 400, "invalid_grant", "Invalid, expired, or reused refresh token.");
     }
@@ -328,9 +342,13 @@ async function exchangeRefreshToken(response: ServerResponse, context: RouteCont
     const tokens = await createTokenPair(client, context.config, token, token.family_id, new Date(token.family_expires_at));
     await client.query("COMMIT");
     sendJson(response, 200, tokens);
+    log("info", "oauth_refresh_token_rotated", { deviceIdSuffix: token.device_public_id.slice(-6), clientIdSuffix: token.client_id.slice(-6), scopes: token.scopes });
     void updateOAuthDiagnostics(context.database, token.device_public_id, { stage: "refresh_token_rotated", tokenError: null, grantFound: true, refreshRotationSuccess: true }).catch(() => undefined);
-  } catch {
+  } catch (error) {
     await client.query("ROLLBACK");
+    const reason = safeOAuthReason(error);
+    log("warn", "oauth_refresh_token_rejected", { reason, clientIdSuffix: clientId.slice(-6), ...(token?.device_public_id ? { deviceIdSuffix: token.device_public_id.slice(-6) } : {}) });
+    if (token?.device_public_id) void updateOAuthDiagnostics(context.database, token.device_public_id, { stage: "refresh_token_rejected", tokenError: reason, grantFound: Boolean(token.grant_id), refreshRotationSuccess: false }).catch(() => undefined);
     sendOAuthError(response, 400, "invalid_grant", "Invalid, expired, or reused refresh token.");
   } finally { client.release(); }
 }
@@ -340,7 +358,7 @@ async function createTokenPair(client: { query: RelayDatabase["query"] }, config
   const refreshToken = randomToken(48);
   await client.query("INSERT INTO refresh_tokens(token_hash,family_id,grant_id,expires_at,family_expires_at) VALUES($1,$2,$3,$4,$5)", [hashSecret(refreshToken, config.tokenSecret), familyId, grant.grant_id, familyExpiresAt, familyExpiresAt]);
   const accessToken = signAccessToken({
-    version: 1, devicePublicId: grant.device_public_id, clientId: grant.client_id, grantId: grant.grant_id,
+    version: 1, devicePublicId: grant.device_public_id, clientId: grant.client_id, grantId: grant.grant_id, grantVersion: grant.token_version,
     scopes: grant.scopes, issuedAt: now, expiresAt: now + accessTokenTtlMs,
     issuer: config.publicOrigin, audience: `${config.publicOrigin}/mcp/${grant.device_public_id}`,
   }, config.signingSecret);
@@ -349,11 +367,15 @@ async function createTokenPair(client: { query: RelayDatabase["query"] }, config
 
 async function revokeToken(request: IncomingMessage, response: ServerResponse, context: RouteContext) {
   const form = await readForm(request);
-  const hash = hashSecret(form.get("token") ?? "", context.config.tokenSecret);
+  const raw = form.get("token") ?? "";
+  const hash = hashSecret(raw, context.config.tokenSecret);
   const row = (await context.database.query("SELECT grant_id FROM refresh_tokens WHERE token_hash=$1", [hash])).rows[0];
-  if (row) {
-    await context.database.query("UPDATE oauth_grants SET revoked_at=NOW() WHERE grant_id=$1", [row.grant_id]);
-    await context.database.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE grant_id=$1", [row.grant_id]);
+  const access = row ? undefined : verifyAccessTokenDetailed(raw, context.config.signingSecret);
+  const grantId = row?.grant_id ?? (access?.ok ? access.claims.grantId : undefined);
+  if (grantId) {
+    await context.database.query("UPDATE oauth_grants SET revoked_at=NOW(),token_version=token_version+1 WHERE grant_id=$1 AND revoked_at IS NULL", [grantId]);
+    await context.database.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE grant_id=$1", [grantId]);
+    log("info", "oauth_grant_revoked", { tokenType: row ? "refresh_token" : "access_token" });
   }
   response.writeHead(200).end();
 }
@@ -361,16 +383,39 @@ async function revokeToken(request: IncomingMessage, response: ServerResponse, c
 async function forwardMcp(request: IncomingMessage, response: ServerResponse, context: RouteContext, devicePublicId: string) {
   const token = bearerToken(request);
   const audience = `${context.config.publicOrigin}/mcp/${devicePublicId}`;
-  const claims = token ? verifyAccessToken(token, context.config.signingSecret, Date.now(), { issuer: context.config.publicOrigin, audience }) : undefined;
-  if (!claims || claims.devicePublicId !== devicePublicId || !claims.scopes.includes("mcp:read")) return unauthorized(response, context, devicePublicId);
-  const grant = (await context.database.query("SELECT g.scopes,d.access_mode FROM oauth_grants g JOIN relay_devices d ON d.device_public_id=g.device_public_id WHERE g.grant_id=$1 AND g.client_id=$2 AND g.device_public_id=$3 AND g.revoked_at IS NULL AND d.revoked_at IS NULL", [claims.grantId, claims.clientId, devicePublicId])).rows[0];
-  if (!grant) return unauthorized(response, context, devicePublicId);
-  if (!context.hub.isOnline(devicePublicId)) return sendJson(response, 503, rpcError(null, -32004, "Aevum device is offline."));
+  const verification = token ? verifyAccessTokenDetailed(token, context.config.signingSecret, Date.now(), { issuer: context.config.publicOrigin, audience }) : { ok: false as const, reason: "missing_token" as const };
+  if (!verification.ok) {
+    log("warn", "mcp_token_rejected", { deviceIdSuffix: devicePublicId.slice(-6), reason: verification.reason });
+    void updateOAuthDiagnostics(context.database, devicePublicId, { stage: "mcp_token_rejected", tokenError: verification.reason }).catch(() => undefined);
+    return unauthorized(response, context, devicePublicId, verification.reason);
+  }
+  const claims = verification.claims;
+  if (claims.devicePublicId !== devicePublicId) {
+    log("warn", "mcp_token_rejected", { deviceIdSuffix: devicePublicId.slice(-6), reason: "device_mismatch" });
+    void updateOAuthDiagnostics(context.database, devicePublicId, { stage: "mcp_token_rejected", tokenError: "device_mismatch" }).catch(() => undefined);
+    return unauthorized(response, context, devicePublicId, "device_mismatch");
+  }
+  const grant = (await context.database.query("SELECT g.scopes,g.token_version,d.access_mode FROM oauth_grants g JOIN relay_devices d ON d.device_public_id=g.device_public_id WHERE g.grant_id=$1 AND g.client_id=$2 AND g.device_public_id=$3 AND g.revoked_at IS NULL AND d.revoked_at IS NULL", [claims.grantId, claims.clientId, devicePublicId])).rows[0];
+  if (!grant || grant.token_version !== claims.grantVersion) {
+    log("warn", "mcp_token_rejected", { deviceIdSuffix: devicePublicId.slice(-6), clientIdSuffix: claims.clientId.slice(-6), reason: grant ? "grant_version_mismatch" : "grant_missing" });
+    void updateOAuthDiagnostics(context.database, devicePublicId, { stage: "mcp_token_rejected", tokenError: grant ? "grant_version_mismatch" : "grant_missing", grantFound: Boolean(grant) }).catch(() => undefined);
+    return unauthorized(response, context, devicePublicId, grant ? "grant_version_mismatch" : "grant_missing");
+  }
   const payload = await readJson(request);
   const id = isRecord(payload) && (typeof payload.id === "string" || typeof payload.id === "number") ? payload.id : null;
+  const requiredScope = requiredScopeForMcpPayload(payload);
+  if (!claims.scopes.includes(requiredScope) || !(grant.scopes as string[]).includes(requiredScope)) {
+    log("warn", "mcp_scope_rejected", { deviceIdSuffix: devicePublicId.slice(-6), clientIdSuffix: claims.clientId.slice(-6), requiredScope });
+    void updateOAuthDiagnostics(context.database, devicePublicId, { stage: "mcp_scope_rejected", tokenError: "insufficient_scope", grantFound: true }).catch(() => undefined);
+    return insufficientScope(response, requiredScope);
+  }
+  if (!context.hub.isOnline(devicePublicId)) return sendJson(response, 503, rpcError(id, -32004, "Aevum device is offline."));
   try {
     const allowedNow = scopesForMode(accessModeSchema.parse(grant.access_mode));
     const effectiveScopes = claims.scopes.filter((scope) => allowedNow.includes(scope) && (grant.scopes as string[]).includes(scope));
+    await context.database.query("UPDATE oauth_grants SET last_used_at=NOW() WHERE grant_id=$1", [claims.grantId]);
+    log("info", "mcp_token_accepted", { deviceIdSuffix: devicePublicId.slice(-6), clientIdSuffix: claims.clientId.slice(-6), scopes: effectiveScopes });
+    void updateOAuthDiagnostics(context.database, devicePublicId, { stage: "mcp_token_accepted", tokenError: null, grantFound: true }).catch(() => undefined);
     const result = await context.hub.requestMcp(devicePublicId, effectiveScopes, payload);
     sendJson(response, 200, result);
   } catch (error) {
@@ -435,8 +480,9 @@ class DeviceHub {
     if (!existing) await this.database.query("INSERT INTO relay_devices(device_public_id,device_secret_hash,access_mode) VALUES($1,$2,$3)", [message.devicePublicId, secretHash, message.accessMode]);
     else {
       if (existing.access_mode !== message.accessMode && isAccessModeExpansion(accessModeSchema.parse(existing.access_mode), message.accessMode)) {
-        await this.database.query("UPDATE oauth_grants SET revoked_at=NOW() WHERE device_public_id=$1 AND revoked_at IS NULL", [message.devicePublicId]);
+        await this.database.query("UPDATE oauth_grants SET revoked_at=NOW(),token_version=token_version+1 WHERE device_public_id=$1 AND revoked_at IS NULL", [message.devicePublicId]);
         await this.database.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE grant_id IN (SELECT grant_id FROM oauth_grants WHERE device_public_id=$1)", [message.devicePublicId]);
+        log("info", "oauth_grants_invalidated", { deviceIdSuffix: message.devicePublicId.slice(-6), reason: "access_mode_expanded", previousMode: existing.access_mode, nextMode: message.accessMode });
       } else if (existing.access_mode !== message.accessMode) {
         const reducedScopes = scopesForMode(message.accessMode);
         await this.database.query("UPDATE oauth_grants SET scopes=$2::jsonb WHERE device_public_id=$1 AND revoked_at IS NULL", [message.devicePublicId, JSON.stringify(reducedScopes)]);
@@ -533,16 +579,44 @@ async function getActiveDevice(database: RelayDatabase, devicePublicId: string) 
   return (await database.query("SELECT device_public_id,access_mode FROM relay_devices WHERE device_public_id=$1 AND revoked_at IS NULL", [devicePublicId])).rows[0] as { device_public_id: string; access_mode: AccessMode } | undefined;
 }
 
-function unauthorized(response: ServerResponse, context: RouteContext, devicePublicId: string) {
-  response.setHeader("WWW-Authenticate", `Bearer resource_metadata="${context.config.publicOrigin}/.well-known/oauth-protected-resource/mcp/${devicePublicId}"`);
-  sendJson(response, 401, rpcError(null, -32001, "Authentication required."));
+function unauthorized(response: ServerResponse, context: RouteContext, devicePublicId: string, reason = "invalid_token") {
+  response.setHeader("WWW-Authenticate", `Bearer resource_metadata="${context.config.publicOrigin}/.well-known/oauth-protected-resource/mcp/${devicePublicId}", error="invalid_token"`);
+  sendJson(response, 401, { error: "invalid_token", error_description: "The access token is invalid or expired.", reason });
+}
+
+function insufficientScope(response: ServerResponse, requiredScope: string) {
+  response.setHeader("WWW-Authenticate", `Bearer error="insufficient_scope", scope="${requiredScope}"`);
+  sendJson(response, 403, { error: "insufficient_scope", error_description: `The ${requiredScope} scope is required.` });
+}
+
+const proposalTools = new Set(["propose_task_changes", "start_full_agent_workflow"]);
+const writeTools = new Set(["create_tasks", "update_task", "reschedule_task", "set_task_status", "delete_task", "assign_task_to_category", "create_category", "rename_category"]);
+function requiredScopeForMcpPayload(payload: unknown) {
+  if (!isRecord(payload) || payload.method !== "tools/call" || !isRecord(payload.params) || typeof payload.params.name !== "string") return "mcp:read";
+  if (writeTools.has(payload.params.name)) return "mcp:write";
+  if (proposalTools.has(payload.params.name)) return "mcp:propose";
+  return "mcp:read";
 }
 
 function rpcError(id: unknown, code: number, message: string) { return { jsonrpc: "2.0", id, error: { code, message } }; }
 function bearerToken(request: IncomingMessage) { const value = request.headers.authorization; return value?.startsWith("Bearer ") ? value.slice(7) : undefined; }
 function firstHeader(value: string | string[] | undefined) { return Array.isArray(value) ? value[0] : value; }
-function safePath(value: string | undefined) { try { return new URL(value ?? "/", "http://relay").pathname; } catch { return "/"; } }
+function safePath(value: string | undefined) {
+  try {
+    return new URL(value ?? "/", "http://relay").pathname
+      .replace(/^\/mcp\/[^/]+$/, "/mcp/:devicePublicId")
+      .replace(/^\/device\/[^/]+\/clients\/[^/]+$/, "/device/:devicePublicId/clients/:clientId")
+      .replace(/^\/device\/[^/]+\/clients$/, "/device/:devicePublicId/clients")
+      .replace(/^\/device\/[^/]+$/, "/device/:devicePublicId")
+      .replace(/^\/oauth\/session\/[^/]+\/status$/, "/oauth/session/:sessionId/status")
+      .replace(/^\/\.well-known\/oauth-protected-resource\/mcp\/[^/]+$/, "/.well-known/oauth-protected-resource/mcp/:devicePublicId");
+  } catch { return "/"; }
+}
 function safeError(error: unknown) { return error instanceof Error ? error.name : "unknown"; }
+function safeOAuthReason(error: unknown) {
+  if (!(error instanceof Error)) return "invalid_grant";
+  return ["invalid_grant", "refresh_token_missing", "client_mismatch", "grant_revoked", "refresh_token_expired"].includes(error.message) ? error.message : "invalid_grant";
+}
 function log(level: "info" | "warn" | "error", event: string, fields: Record<string, unknown> = {}) { process.stdout.write(`${JSON.stringify({ time: new Date().toISOString(), level, event, ...fields })}\n`); }
 function isRecord(value: unknown): value is Record<string, any> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isSafeRedirectUri(value: unknown) { if (typeof value !== "string") return false; try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash; } catch { return false; } }
