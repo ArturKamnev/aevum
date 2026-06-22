@@ -1,0 +1,26 @@
+{
+  "name": "@aevum/relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "pg": "^8.16.3",
+    "ws": "^8.21.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "@types/pg": "^8.15.6",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.7"
+  }
+}

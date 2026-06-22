@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clock3,
   Cpu,
+  Copy,
   Database,
   Download,
   ExternalLink,
@@ -20,12 +21,15 @@ import {
   RefreshCw,
   RotateCcw,
   Send,
+  Server,
+  ShieldCheck,
   Sun,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
-import type { AvailabilityBlock, AIProvider, Language, ReminderOffsetMinutes, ThemeMode, TimeFormat, UserSettings } from "../types";
+import type { AvailabilityBlock, AIProvider, Language, McpAccessMode, McpConnectionMode, McpTunnelMode, OverdueAutoCleanupMode, ReminderOffsetMinutes, ThemeMode, TimeFormat, UserSettings } from "../types";
+import { normalizeMcpPublicOrigin } from "../services/mcpSettings";
 import { createAvailabilityId } from "../utils/id";
 import { SettingsHelpPopover } from "./SettingsHelpPopover";
 import recommendedModelsJson from "../../electron/recommended_models.json";
@@ -39,7 +43,11 @@ interface SettingsPageProps {
 type SetupStatus = OllamaSetupStatus;
 type UpdateStatus = UpdateCheckResult;
 type PullState = "idle" | "loading" | "success" | "error";
-type ConfirmAction = { type: "cache" } | { type: "history" } | { type: "delete-model"; modelName: string };
+type ConfirmAction =
+  | { type: "cache" }
+  | { type: "history" }
+  | { type: "delete-model"; modelName: string }
+  | { type: "overdue-delete" };
 
 
 const openRouterModelOptions = [
@@ -90,6 +98,11 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatusResult | null>(null);
   const [telegramConnecting, setTelegramConnecting] = useState(false);
   const [telegramNotice, setTelegramNotice] = useState("");
+  const [mcpStatus, setMcpStatus] = useState<McpStatusResult | null>(null);
+  const [aevumConnectStatus, setAevumConnectStatus] = useState<AevumConnectStatusResult | null>(null);
+  const [mcpNotice, setMcpNotice] = useState("");
+  const [mcpPortDraft, setMcpPortDraft] = useState(String(settings.mcpPort));
+  const [mcpRemoteUrlDraft, setMcpRemoteUrlDraft] = useState(settings.mcpRemoteUrl);
 
   const installedModels = ollamaStatus?.models ?? [];
   const selectedModelInstalled = ollamaStatus?.selectedModelInstalled ?? installedModels.some((model) => model.name === settings.localModel);
@@ -121,16 +134,120 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
       if (payload.status === "error") setPullState("error");
     });
     const removeTelegramListener = window.todoAI?.onTelegramStatus((payload) => setTelegramStatus(payload));
+    const removeMcpListener = window.todoAI?.onMcpStatus((payload) => setMcpStatus(payload));
+    const removeAevumConnectListener = window.todoAI?.onAevumConnectStatus((payload) => setAevumConnectStatus(payload));
 
     void refreshOllamaStatus(false);
     void refreshTelegramStatus();
+    void refreshMcpStatus();
+    void refreshAevumConnectStatus();
     return () => {
       isMounted = false;
       removeUpdateListener?.();
       removePullListener?.();
       removeTelegramListener?.();
+      removeMcpListener?.();
+      removeAevumConnectListener?.();
     };
   }, []);
+
+  async function refreshMcpStatus() {
+    const status = await window.todoAI?.getMcpStatus();
+    if (status) setMcpStatus(status);
+  }
+
+  async function refreshAevumConnectStatus() {
+    const status = await window.todoAI?.getAevumConnectStatus();
+    if (status) setAevumConnectStatus(status);
+  }
+
+  async function copyMcpToken() {
+    const result = await window.todoAI?.getMcpToken();
+    if (!result?.token) return setMcpNotice(t("settings.mcpCopyFailed"));
+    await navigator.clipboard.writeText(result.token);
+    setMcpNotice(t("settings.mcpTokenCopied"));
+  }
+
+  async function regenerateMcpToken() {
+    const result = await window.todoAI?.regenerateMcpToken();
+    if (!result?.ok) return setMcpNotice(t("settings.mcpRegenerateFailed"));
+    setMcpStatus(result.status);
+    setMcpNotice(t("settings.mcpTokenRegenerated"));
+  }
+
+  async function copyMcpConfig() {
+    const endpoint = settings.mcpAuthenticationMode === "oauth"
+      ? mcpStatus?.remoteEndpoint ?? `${settings.mcpRemoteUrl.replace(/\/$/, "")}/mcp`
+      : mcpStatus?.endpoint ?? `http://127.0.0.1:${settings.mcpPort}/mcp`;
+    let config: Record<string, unknown> = { mcpServers: { aevum: { url: endpoint } } };
+    if (settings.mcpAuthenticationMode === "bearer") {
+      const result = await window.todoAI?.getMcpToken();
+      if (!result?.token) return setMcpNotice(t("settings.mcpCopyFailed"));
+      config = { mcpServers: { aevum: { url: endpoint, headers: { Authorization: `Bearer ${result.token}` } } } };
+    }
+    await navigator.clipboard.writeText(JSON.stringify(config, null, 2));
+    setMcpNotice(t("settings.mcpConfigCopied"));
+  }
+
+  async function copyMcpConnectorUrl() {
+    const connectorUrl = settings.mcpConnectionMode === "aevum-connect"
+      ? aevumConnectStatus?.connectorUrl
+      : mcpStatus?.tunnel.connectorUrl ?? mcpStatus?.remoteEndpoint;
+    if (!connectorUrl) return setMcpNotice(t("settings.mcpCopyFailed"));
+    await navigator.clipboard.writeText(connectorUrl);
+    setMcpNotice(t("settings.mcpConnectorCopied"));
+  }
+
+  async function resetAevumConnect() {
+    const status = await window.todoAI?.resetAevumConnect();
+    if (status) setAevumConnectStatus(status);
+    setMcpNotice(status?.state === "error" ? "" : t("settings.mcpConnectResetDone"));
+  }
+
+  async function refreshAevumConnectClients() {
+    const clients = await window.todoAI?.listAevumConnectClients().catch(() => undefined);
+    if (clients) setAevumConnectStatus((current) => current ? { ...current, clients } : current);
+  }
+
+  async function revokeAevumConnectClient(clientId: string) {
+    await window.todoAI?.revokeAevumConnectClient(clientId);
+    await refreshAevumConnectClients();
+  }
+
+  async function revokeAllAevumConnectClients() {
+    await window.todoAI?.revokeAllAevumConnectClients();
+    await refreshAevumConnectClients();
+  }
+
+  function commitMcpPort() {
+    const port = Number(mcpPortDraft);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      setMcpPortDraft(String(settings.mcpPort));
+      setMcpNotice(t("settings.mcpInvalidPort"));
+      return;
+    }
+    updateSettings({ mcpPort: port });
+  }
+
+  function commitMcpRemoteUrl() {
+    const normalized = normalizeMcpPublicOrigin(mcpRemoteUrlDraft);
+    if (normalized) {
+      setMcpRemoteUrlDraft(normalized);
+      updateSettings({ mcpRemoteUrl: normalized });
+      setMcpNotice("");
+    } else {
+      setMcpNotice(t("settings.mcpInvalidRemoteUrl"));
+    }
+  }
+
+  function updateMcpAccessMode(accessMode: McpAccessMode) {
+    updateSettings({ mcpAccessMode: accessMode });
+    setMcpNotice(t("settings.mcpReconnectRequired"));
+  }
+
+  useEffect(() => {
+    setMcpRemoteUrlDraft(settings.mcpRemoteUrl);
+  }, [settings.mcpRemoteUrl]);
 
   useEffect(() => {
     setCustomModel(settings.localModel);
@@ -440,6 +557,101 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             </button>
           ))}
         </div>
+      </SettingsSection>
+
+      <SettingsSection icon={Server} title={t("settings.mcpTitle")} description={t("settings.mcpDescription")}>
+        <div className="mcp-settings-card">
+          <div className="mcp-settings-heading">
+            <label className="toggle-row toggle-row--compact">
+              <span>
+                <strong>{t("settings.mcpEnable")}</strong>
+                <small>{settings.mcpConnectionMode === "aevum-connect" ? t("settings.mcpConnectDescription") : t("settings.mcpQuickTunnelTemporary")}</small>
+              </span>
+              <input checked={settings.mcpEnabled} onChange={(event) => updateSettings({ mcpEnabled: event.target.checked })} type="checkbox" />
+            </label>
+            <span className={`status-pill status-pill--${settings.mcpConnectionMode === "aevum-connect" ? aevumConnectStatusTone(aevumConnectStatus?.state) : mcpStatusTone(mcpStatus?.status)}`}>
+              {settings.mcpConnectionMode === "aevum-connect" ? formatAevumConnectStatus(aevumConnectStatus?.state, t) : formatMcpStatus(mcpStatus?.status, t)}
+            </span>
+          </div>
+          <div className="mcp-settings-grid">
+            <label className="field-row">
+              <span>{t("settings.mcpConnectionMode")}</span>
+              <select value={settings.mcpConnectionMode} onChange={(event) => updateSettings({ mcpConnectionMode: event.target.value as McpConnectionMode })}>
+                <option value="aevum-connect">{t("settings.mcpAevumConnect")}</option>
+                <option value="quick-tunnel">{t("settings.mcpQuickTunnel")}</option>
+              </select>
+            </label>
+            <label className="field-row">
+              <span>{t("settings.mcpAccessMode")}</span>
+              <select value={settings.mcpAccessMode} onChange={(event) => updateMcpAccessMode(event.target.value as McpAccessMode)}>
+                <option value="read-only">{t("settings.mcpReadOnly")}</option>
+                <option value="proposals">{t("settings.mcpProposalsOnly")}</option>
+                <option value="full-access">{t("settings.mcpFullAccess")}</option>
+              </select>
+            </label>
+            {settings.mcpConnectionMode === "quick-tunnel" ? <label className="field-row">
+              <span>{t("settings.mcpPort")}</span>
+              <input type="number" min={1024} max={65535} value={mcpPortDraft} onChange={(event) => setMcpPortDraft(event.target.value)} onBlur={commitMcpPort} />
+            </label> : null}
+          </div>
+          {settings.mcpConnectionMode === "quick-tunnel" ? (
+            <p className="mcp-temporary-note"><Clock3 size={13} />{t("settings.mcpQuickTunnelTemporary")}</p>
+          ) : null}
+          <div className="mcp-endpoint-list">
+            {settings.mcpConnectionMode === "aevum-connect" ? (
+              <div><span>{t("settings.mcpConnectorUrl")}</span><code>{aevumConnectStatus?.connectorUrl ?? t("settings.mcpRemoteEndpointPending")}</code></div>
+            ) : (
+              <>
+                <div><span>{t("settings.mcpTunnelStatus")}</span><span className={`status-pill status-pill--${mcpTunnelStatusTone(mcpStatus?.tunnel.state, "temporary", Boolean(mcpStatus?.remoteEndpoint))}`}>{formatMcpTunnelStatus(mcpStatus?.tunnel.state, t, "temporary", Boolean(mcpStatus?.remoteEndpoint))}</span></div>
+                <div><span>{t("settings.mcpConnectorUrl")}</span><code>{mcpStatus?.tunnel.connectorUrl ?? mcpStatus?.remoteEndpoint ?? t("settings.mcpRemoteEndpointPending")}</code></div>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="data-actions">
+          <button className="button button--secondary" onClick={() => void copyMcpConnectorUrl()} type="button">
+            <Copy size={14} />
+            {t("settings.mcpCopyConnectorUrl")}
+          </button>
+          {settings.mcpConnectionMode === "aevum-connect" ? <button className="button button--secondary" onClick={() => void resetAevumConnect()} type="button">
+            <RotateCcw size={14} />
+            {t("settings.mcpResetPersonalUrl")}
+          </button> : null}
+        </div>
+        {settings.mcpConnectionMode === "aevum-connect" ? <details className="mcp-security-details" onToggle={(event) => { if (event.currentTarget.open) void refreshAevumConnectClients(); }}>
+          <summary><KeyRound size={15} />{t("settings.mcpConnectedClients")}</summary>
+          <div>
+            {(aevumConnectStatus?.clients ?? []).length ? (aevumConnectStatus?.clients ?? []).map((client) => <div className="mcp-client-row" key={client.clientId}>
+              <span><strong>{client.name}</strong><small>{client.scopes.join(" ")}</small></span>
+              <button className="button button--secondary" onClick={() => void revokeAevumConnectClient(client.clientId)} type="button">{t("settings.mcpRevokeClient")}</button>
+            </div>) : <p>{t("settings.mcpNoConnectedClients")}</p>}
+            {(aevumConnectStatus?.clients ?? []).length ? <button className="button button--secondary" onClick={() => void revokeAllAevumConnectClients()} type="button">{t("settings.mcpRevokeAll")}</button> : null}
+          </div>
+        </details> : null}
+        <details className="mcp-security-details">
+          <summary><ShieldCheck size={15} />{t("settings.mcpSecurityDetails")}</summary>
+          <div>
+            <p>{t("settings.mcpWarning")}</p>
+            {settings.mcpAuthenticationMode === "oauth" ? <p>{t("settings.mcpOAuthWarning")}</p> : null}
+            <p>{settings.mcpAccessMode === "read-only" ? t("settings.mcpReadOnlyHint") : t("settings.mcpConfirmationPolicy")}</p>
+            <dl className="mcp-diagnostics">
+              <div><dt>{t("settings.mcpSelectedMode")}</dt><dd>{formatMcpAccessMode(mcpStatus?.toolAccess.selectedMode ?? settings.mcpAccessMode, t)}</dd></div>
+              <div><dt>{t("settings.mcpGrantedScopes")}</dt><dd>{mcpStatus?.toolAccess.grantedScopes.join(" ") || t("settings.mcpNoActiveGrant")}</dd></div>
+              <div><dt>{t("settings.mcpRegisteredClients")}</dt><dd>{mcpStatus?.toolAccess.registeredClientCount ?? 0}</dd></div>
+              <div><dt>{t("settings.mcpActiveGrants")}</dt><dd>{mcpStatus?.toolAccess.activeGrantCount ?? 0}</dd></div>
+              <div><dt>{t("settings.mcpWriteToolsExposed")}</dt><dd>{mcpStatus?.toolAccess.writeToolsExposed ? t("settings.mcpYes") : t("settings.mcpNo")}</dd></div>
+              <div><dt>{t("settings.mcpLastToolListMode")}</dt><dd>{mcpStatus?.toolAccess.lastToolListMode ? formatMcpAccessMode(mcpStatus.toolAccess.lastToolListMode, t) : t("settings.mcpNotRequested")}</dd></div>
+            </dl>
+            {settings.mcpAuthenticationMode === "oauth" ? <p>{t("settings.mcpOAuthStage")}: {formatMcpOAuthStage(mcpStatus?.oauth.currentStage, t)} · {t("settings.mcpOAuthSessions")}: {mcpStatus?.oauth.activeSessionCount ?? 0}</p> : null}
+          </div>
+        </details>
+        {mcpStatus?.oauth.lastError ? <p className="settings-error">{t("settings.mcpLastOAuthError")}: {mcpStatus.oauth.lastError}</p> : null}
+        {mcpStatus?.toolAccess.lastToolError ? <p className="settings-error">{t("settings.mcpLastToolError")}: {mcpStatus.toolAccess.lastToolError}</p> : null}
+        {mcpStatus?.tunnel.error ? <p className="settings-error">{mcpStatus.tunnel.state === "missing" ? t("settings.mcpCloudflaredMissing") : mcpStatus.tunnel.error}</p> : null}
+        {settings.mcpConnectionMode === "aevum-connect" && aevumConnectStatus?.message ? <p className="settings-error">{aevumConnectStatus.message}</p> : null}
+        {settings.mcpAccessMode === "read-only" ? <p className="settings-helper-inline">{t("settings.mcpReadOnlyHint")}</p> : null}
+        {mcpNotice ? <p className="settings-success">{mcpNotice}</p> : null}
+        {mcpStatus?.message ? <p className="settings-error">{mcpStatus.message}</p> : null}
       </SettingsSection>
 
       <SettingsSection
@@ -1082,6 +1294,33 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             <option value="last-view">{t("settings.startupLastView")}</option>
           </select>
         </label>
+        <label className="field-row">
+          <span>
+            <strong>{t("settings.overdueAutoCleanup")}</strong>
+            <small>{t("settings.overdueAutoCleanupDescription")}</small>
+          </span>
+          <select
+            value={settings.overdueAutoCleanupMode}
+            onChange={(event) => {
+              const mode = event.target.value as OverdueAutoCleanupMode;
+              if (mode === "delete") {
+                setConfirmAction({ type: "overdue-delete" });
+                return;
+              }
+              updateSettings({ overdueAutoCleanupMode: mode });
+            }}
+          >
+            <option value="off">{t("settings.overdueAutoCleanupOff")}</option>
+            <option value="archive">{t("settings.overdueAutoCleanupArchive")}</option>
+            <option value="delete">{t("settings.overdueAutoCleanupDelete")}</option>
+          </select>
+        </label>
+        {settings.overdueAutoCleanupMode === "delete" ? (
+          <div className="settings-warning" role="alert">
+            <AlertTriangle size={14} />
+            <span>{t("settings.overdueAutoCleanupDeleteWarning")}</span>
+          </div>
+        ) : null}
       </SettingsSection>
 
       <SettingsSection icon={Database} title={t("settings.data")}>
@@ -1111,11 +1350,15 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
                 {t("settings.cancel")}
               </button>
               <button
-                className={confirmAction.type === "delete-model" ? "button button--danger" : "button button--primary"}
+                className={confirmAction.type === "delete-model" || confirmAction.type === "overdue-delete" ? "button button--danger" : "button button--primary"}
                 onClick={() => {
                   if (confirmAction.type === "cache") void handleClearCache();
                   if (confirmAction.type === "history") handleClearHistory();
                   if (confirmAction.type === "delete-model") void handleDeleteModel(confirmAction.modelName);
+                  if (confirmAction.type === "overdue-delete") {
+                    updateSettings({ overdueAutoCleanupMode: "delete" });
+                    setConfirmAction(null);
+                  }
                 }}
               >
                 {t("settings.confirm")}
@@ -1228,6 +1471,7 @@ function getConfirmTitle(
 ) {
   if (action.type === "cache") return t("settings.confirmClearCacheTitle");
   if (action.type === "history") return t("settings.confirmClearHistoryTitle");
+  if (action.type === "overdue-delete") return t("settings.overdueAutoCleanupConfirmDeleteTitle");
   return t("settings.confirmDeleteModelTitle");
 }
 
@@ -1237,6 +1481,7 @@ function getConfirmDescription(
 ) {
   if (action.type === "cache") return t("settings.confirmClearCacheDescription");
   if (action.type === "history") return t("settings.confirmClearHistoryDescription");
+  if (action.type === "overdue-delete") return t("settings.overdueAutoCleanupDeleteWarning");
   return `${t("settings.confirmDeleteModelDescription")} ${action.modelName}`;
 }
 
@@ -1279,6 +1524,68 @@ function telegramStatusTone(status: TelegramBridgeStatus | undefined) {
   if (status === "connected") return "connected";
   if (status === "not-paired" || status === "connecting" || status === "reconnecting") return "model-missing";
   return "not-connected";
+}
+
+function formatMcpStatus(status: McpServerState | undefined, t: ReturnType<typeof useI18n>["t"]) {
+  if (status === "starting") return t("settings.mcpStatusStarting");
+  if (status === "running") return t("settings.mcpStatusRunning");
+  if (status === "error") return t("settings.mcpStatusError");
+  return t("settings.mcpStatusDisabled");
+}
+
+function mcpStatusTone(status: McpServerState | undefined) {
+  if (status === "running") return "connected";
+  if (status === "starting") return "neutral";
+  if (status === "error") return "not-connected";
+  return "neutral";
+}
+
+function formatAevumConnectStatus(status: AevumConnectStatusResult["state"] | undefined, t: ReturnType<typeof useI18n>["t"]) {
+  if (status === "connecting") return t("settings.mcpConnectStatusConnecting");
+  if (status === "connected") return t("settings.mcpConnectStatusConnected");
+  if (status === "offline") return t("settings.mcpConnectStatusOffline");
+  if (status === "error") return t("settings.mcpStatusError");
+  return t("settings.mcpStatusDisabled");
+}
+
+function aevumConnectStatusTone(status: AevumConnectStatusResult["state"] | undefined) {
+  if (status === "connected") return "connected";
+  if (status === "connecting") return "neutral";
+  if (status === "offline" || status === "error") return "not-connected";
+  return "neutral";
+}
+
+function formatMcpAccessMode(mode: McpAccessMode, t: ReturnType<typeof useI18n>["t"]) {
+  if (mode === "full-access") return t("settings.mcpFullAccess");
+  if (mode === "proposals") return t("settings.mcpProposalsOnly");
+  return t("settings.mcpReadOnly");
+}
+
+function formatMcpTunnelStatus(status: McpStatusResult["tunnel"]["state"] | undefined, t: ReturnType<typeof useI18n>["t"], mode: McpTunnelMode, hasRemoteEndpoint: boolean) {
+  if (mode === "persistent") return hasRemoteEndpoint ? t("settings.mcpPersistentConfigured") : t("settings.mcpPersistentNeedsOrigin");
+  if (status === "starting") return t("settings.mcpTunnelStarting");
+  if (status === "running") return t("settings.mcpTunnelRunning");
+  if (status === "error") return t("settings.mcpTunnelError");
+  if (status === "missing") return t("settings.mcpTunnelMissing");
+  return t("settings.mcpTunnelDisabled");
+}
+
+function mcpTunnelStatusTone(status: McpStatusResult["tunnel"]["state"] | undefined, mode: McpTunnelMode, hasRemoteEndpoint: boolean) {
+  if (mode === "persistent") return hasRemoteEndpoint ? "connected" : "neutral";
+  if (status === "running") return "connected";
+  if (status === "starting") return "neutral";
+  if (status === "error" || status === "missing") return "not-connected";
+  return "neutral";
+}
+
+function formatMcpOAuthStage(stage: McpStatusResult["oauth"]["currentStage"] | undefined, t: ReturnType<typeof useI18n>["t"]) {
+  if (stage === "pending_browser_consent") return t("settings.mcpOAuthPendingBrowser");
+  if (stage === "pending_native_approval") return t("settings.mcpOAuthPendingNative");
+  if (stage === "approved") return t("settings.mcpOAuthApproved");
+  if (stage === "denied") return t("settings.mcpOAuthDenied");
+  if (stage === "expired") return t("settings.mcpOAuthExpired");
+  if (stage === "consumed") return t("settings.mcpOAuthConsumed");
+  return t("settings.mcpOAuthIdle");
 }
 
 function formatTelegramChat(chat: NonNullable<TelegramStatusResult["pairedChat"]>) {

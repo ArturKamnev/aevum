@@ -22,6 +22,9 @@ interface AIAssistantPanelProps {
   onCancelAIProposal: (proposal: AIActionProposal) => void;
   onConfirmAIProposal: (proposal: AIActionProposal) => AIActionConfirmResult;
   onUndoAIAction: (transactionId: string) => AIActionUndoResult;
+  onCleanupBusyChange?: (busy: boolean) => void;
+  externalProposal?: AIActionProposal | null;
+  onExternalProposalResolved?: (proposalId: string) => void;
   projects: Project[];
   setMessages: (messages: AssistantMessage[]) => void;
   settings: UserSettings;
@@ -75,6 +78,9 @@ export function AIAssistantPanel({
   onCancelAIProposal,
   onConfirmAIProposal,
   onUndoAIAction,
+  onCleanupBusyChange,
+  externalProposal,
+  onExternalProposalResolved,
   projects,
   setMessages,
   settings,
@@ -95,6 +101,15 @@ export function AIAssistantPanel({
   const [undoCandidate, setUndoCandidate] = useState<AIActionAuditEntry | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingAction = pendingProposal?.action ?? null;
+
+  useEffect(() => {
+    onCleanupBusyChange?.(isThinking || Boolean(pendingProposal) || Boolean(undoCandidate));
+    return () => onCleanupBusyChange?.(false);
+  }, [isThinking, onCleanupBusyChange, pendingProposal, undoCandidate]);
+
+  useEffect(() => {
+    if (externalProposal && pendingProposal?.id !== externalProposal.id) setPendingProposal(externalProposal);
+  }, [externalProposal, pendingProposal?.id]);
 
   const [panelState, setPanelState] = useState<"empty" | "leaving-empty" | "conversation">(
     messages.length === 0 ? "empty" : "conversation"
@@ -274,6 +289,7 @@ export function AIAssistantPanel({
           metadata: { actionType: action.type },
         },
       ]);
+      if (pendingProposal.source === "mcp") onExternalProposalResolved?.(pendingProposal.id);
       setPendingProposal(null);
     } catch (error) {
       if (import.meta.env.DEV) {
@@ -289,6 +305,7 @@ export function AIAssistantPanel({
           metadata: { actionType: action.type },
         },
       ]);
+      if (pendingProposal.source === "mcp") onExternalProposalResolved?.(pendingProposal.id);
       setPendingProposal(null);
     }
   }
@@ -298,6 +315,7 @@ export function AIAssistantPanel({
     onCancelAIProposal(pendingProposal);
     const actionType = pendingProposal.actionType;
     setPendingProposal(null);
+    if (pendingProposal.source === "mcp") onExternalProposalResolved?.(pendingProposal.id);
     setMessages([
       ...messages,
       {
@@ -381,7 +399,7 @@ export function AIAssistantPanel({
                             <span>{formatAuditTime(entry.appliedAt, language)}</span>
                           </div>
                           <div className="assistant-activity-item__meta">
-                            <span>{entry.source === "telegram" ? t("assistant.sourceTelegram") : t("assistant.sourceAI")}</span>
+                            <span>{entry.source === "telegram" ? t("assistant.sourceTelegram") : entry.source === "mcp" ? t("assistant.sourceMcp") : t("assistant.sourceAI")}</span>
                             <span>{formatAuditStatus(entry, canUndo, t)}</span>
                           </div>
                         </div>

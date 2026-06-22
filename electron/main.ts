@@ -1,12 +1,15 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, Notification, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import keytar from "keytar";
 import os from "node:os";
 import path from "node:path";
 import recommendedModelsJson from "./recommended_models.json";
 import { TelegramBridge, type TelegramBridgeSettings } from "./telegramService";
+import { AevumMcpService, type McpProposalRequest } from "./mcpService";
+import { AevumConnectClient, type AevumConnectIdentity } from "./aevumConnectClient";
 
 const isDev = !app.isPackaged;
 const ollamaDownloadUrl = "https://ollama.com/download";
@@ -19,6 +22,8 @@ const appName = "Aevum";
 const openRouterService = "Aevum";
 const legacyOpenRouterService = ["Todo", "AI"].join(" ");
 const openRouterAccount = "openrouter";
+const mcpTokenAccount = "mcp-local-token";
+const aevumConnectIdentityAccount = "aevum-connect-device-identity";
 const defaultOpenRouterModel = "openrouter/free";
 const openRouterModels = new Set(["openrouter/free", "deepseek/deepseek-v4-flash:free"]);
 const openRouterEndpoint = "https://openrouter.ai/api/v1/chat/completions";
@@ -83,6 +88,42 @@ let activePull: ChildProcessWithoutNullStreams | null = null;
 const notificationTimers = new Map<string, NodeJS.Timeout>();
 const firedNotifications = new Set<string>();
 const telegramBridge = new TelegramBridge(broadcast);
+let mcpRendererReady = false;
+const pendingMcpRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+const mcpService = new AevumMcpService({
+  getToken: () => keytar.getPassword(appName, mcpTokenAccount),
+  setToken: async (token) => { await keytar.setPassword(appName, mcpTokenAccount, token); },
+  generateToken: () => randomBytes(32).toString("base64url"),
+  requestSnapshot: () => requestMcpRenderer("mcp:snapshot-request", {}),
+  requestProposal: (request: McpProposalRequest) => requestMcpRenderer("mcp:proposal-request", request) as Promise<{ ok: boolean; proposalId?: string; message?: string }>,
+  confirmOAuthAccess,
+  onStatus: (status) => broadcast("mcp:status", status),
+});
+const aevumConnectClient = new AevumConnectClient({
+  getIdentity: async () => {
+    const stored = await keytar.getPassword(appName, aevumConnectIdentityAccount);
+    if (!stored) return null;
+    try { return JSON.parse(stored) as AevumConnectIdentity; } catch { return null; }
+  },
+  setIdentity: async (identity) => { await keytar.setPassword(appName, aevumConnectIdentityAccount, JSON.stringify(identity)); },
+  clearIdentity: async () => { await keytar.deletePassword(appName, aevumConnectIdentityAccount); },
+  handleMcpRequest: (payload, scopes) => mcpService.handleRelayRequest(payload, scopes),
+  confirmOAuthAccess,
+  onStatus: (status) => broadcast("aevum-connect:status", status),
+});
+
+async function confirmOAuthAccess({ clientName, redirectUri, scopes }: { clientName: string; redirectUri: string; scopes: string[] }) {
+  const owner = BrowserWindow.getAllWindows()[0];
+  if (!owner) return false;
+  owner.show(); owner.focus();
+  const accessLevel = scopes.includes("mcp:write") ? "Full Access (productivity writes require confirmation)" : scopes.includes("mcp:propose") ? "Proposals only" : "Read-only";
+  const result = await dialog.showMessageBox(owner, {
+    type: "warning", title: "Authorize Aevum MCP", message: `Allow ${clientName} to connect to Aevum?`,
+    detail: `Access level: ${accessLevel}\nScopes: ${scopes.join(", ")}\nRedirect: ${redirectUri}\n\nTask changes will still require a separate confirmation in Aevum.`,
+    buttons: ["Deny", "Authorize"], defaultId: 0, cancelId: 0, noLink: true,
+  });
+  return result.response === 1;
+}
 
 autoUpdater.autoDownload = false;
 autoUpdater.autoInstallOnAppQuit = false;
@@ -173,6 +214,28 @@ app.whenReady().then(() => {
   ipcMain.handle("telegram:update-settings", async (_event, settings?: unknown) => telegramBridge.setSettings(readTelegramBridgeSettings(settings)));
   ipcMain.handle("telegram:renderer-ready", () => telegramBridge.markRendererReady());
   ipcMain.handle("telegram:renderer-response", (_event, payload?: unknown) => telegramBridge.handleRendererResponse(payload));
+  ipcMain.handle("mcp:get-status", () => mcpService.getStatus());
+  ipcMain.handle("mcp:update-settings", (_event, settings?: unknown) => mcpService.updateSettings(settings));
+  ipcMain.handle("mcp:get-token", () => mcpService.getToken());
+  ipcMain.handle("mcp:regenerate-token", () => mcpService.regenerateToken());
+  ipcMain.handle("aevum-connect:get-status", () => aevumConnectClient.getStatus());
+  ipcMain.handle("aevum-connect:update-settings", (_event, settings?: unknown) => {
+    if (!isRecord(settings)) return aevumConnectClient.getStatus();
+    return aevumConnectClient.updateSettings({
+      enabled: settings.enabled === true,
+      relayOrigin: typeof settings.relayOrigin === "string" ? settings.relayOrigin : "",
+      accessMode: settings.accessMode === "full-access" ? "full-access" : settings.accessMode === "proposals" ? "proposals" : "read-only",
+    });
+  });
+  ipcMain.handle("aevum-connect:reset", () => aevumConnectClient.resetIdentity());
+  ipcMain.handle("aevum-connect:list-clients", () => aevumConnectClient.listClients());
+  ipcMain.handle("aevum-connect:revoke-client", (_event, clientId?: unknown) => typeof clientId === "string" ? aevumConnectClient.revokeClient(clientId) : false);
+  ipcMain.handle("aevum-connect:revoke-all", () => aevumConnectClient.revokeAllClients());
+  ipcMain.handle("mcp:renderer-ready", () => {
+    mcpRendererReady = true;
+    return { ok: true };
+  });
+  ipcMain.handle("mcp:renderer-response", (_event, payload?: unknown) => handleMcpRendererResponse(payload));
   createWindow();
 
   app.on("activate", () => {
@@ -190,6 +253,8 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   telegramBridge.stop();
+  void mcpService.stop();
+  void aevumConnectClient.stop();
 });
 
 autoUpdater.on("checking-for-update", () => setUpdateState({ status: "checking" }));
@@ -231,6 +296,32 @@ function setUpdateState(nextState: typeof updateState) {
   updateState = nextState;
   broadcast("updates:status", updateState);
   return updateState;
+}
+
+function requestMcpRenderer(channel: "mcp:snapshot-request" | "mcp:proposal-request", payload: unknown) {
+  if (!mcpRendererReady || BrowserWindow.getAllWindows().length === 0) {
+    return Promise.reject(new Error("Aevum renderer is not ready."));
+  }
+  const id = randomUUID();
+  return new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingMcpRendererRequests.delete(id);
+      reject(new Error("Aevum renderer did not respond."));
+    }, 15_000);
+    pendingMcpRendererRequests.set(id, { resolve, reject, timer });
+    broadcast(channel, { id, payload });
+  });
+}
+
+function handleMcpRendererResponse(value: unknown) {
+  if (!isRecord(value) || typeof value.id !== "string") return { ok: false };
+  const pending = pendingMcpRendererRequests.get(value.id);
+  if (!pending) return { ok: false };
+  clearTimeout(pending.timer);
+  pendingMcpRendererRequests.delete(value.id);
+  if (value.ok === false) pending.reject(new Error(typeof value.message === "string" ? value.message : "Renderer request failed."));
+  else pending.resolve(value.data);
+  return { ok: true };
 }
 
 function scheduleTaskNotifications(tasks: unknown, settings: unknown) {

@@ -299,6 +299,48 @@ describe("AI action protection foundation", () => {
     expect(telegramAudit.actionKind).toBe("schedule");
   });
 
+  it("confirms and undoes MCP proposals through the shared transaction engine", () => {
+    const state = baseState({ tasks: [task({ id: "task-a", title: "Before" })] });
+    const proposal = createAIActionProposal({
+      type: "manage_tasks",
+      operations: [{ operation: "update", taskId: "task-a", changes: { title: "After" } }],
+    }, "mcp", state, { now, idFactory: idFactory() });
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) return;
+    const confirmed = confirmAIActionProposal(proposal.proposal, state, { now, ledger: createAIActionProposalLedger(), idFactory: idFactory() });
+    expect(confirmed.ok).toBe(true);
+    if (!confirmed.ok) return;
+    expect(confirmed.auditEntry.source).toBe("mcp");
+    expect(confirmed.transaction.after.tasks[0].title).toBe("After");
+    const undo = createUndoAIActionTransaction(confirmed.auditEntry, confirmed.transaction.after, { now, idFactory: idFactory() });
+    expect(undo.ok).toBe(true);
+    if (undo.ok) expect(undo.transaction.after.tasks[0].title).toBe("Before");
+  });
+
+  it("applies Full Access category and task proposals through MCP audit and undo", () => {
+    const state = baseState();
+    const proposal = createAIActionProposal({
+      type: "batch_action",
+      categoriesToCreate: [{ ref: "work", name: "Work" }],
+      tasksToCreate: [{ title: "MCP task", categoryTarget: { kind: "new", ref: "work" } }],
+    }, "mcp", state, { now, idFactory: idFactory() });
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) return;
+
+    const confirmed = confirmAIActionProposal(proposal.proposal, state, { now, ledger: createAIActionProposalLedger(), idFactory: idFactory() });
+    expect(confirmed.ok).toBe(true);
+    if (!confirmed.ok) return;
+    expect(confirmed.auditEntry).toMatchObject({ source: "mcp", actionKind: "batch", status: "applied" });
+    expect(confirmed.transaction.after.projects.some((project) => project.name === "Work")).toBe(true);
+    expect(confirmed.transaction.after.tasks.some((item) => item.title === "MCP task")).toBe(true);
+
+    const undo = createUndoAIActionTransaction(confirmed.auditEntry, confirmed.transaction.after, { now, idFactory: idFactory() });
+    expect(undo.ok).toBe(true);
+    if (!undo.ok) return;
+    expect(undo.transaction.after.projects.some((project) => project.name === "Work")).toBe(false);
+    expect(undo.transaction.after.tasks.some((item) => item.title === "MCP task")).toBe(false);
+  });
+
   it("audit records do not persist secrets or raw model content", () => {
     const applied = mustTransaction(buildAIActionTransaction({
       type: "create_tasks",

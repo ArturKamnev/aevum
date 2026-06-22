@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["main.ts", "preload.ts", "recommended_models.json"]
+  "include": ["main.ts", "preload.ts", "mcpService.ts", "mcpOAuthProvider.ts", "cloudflareQuickTunnel.ts", "aevumConnectClient.ts", "aevumConnectProtocol.ts", "recommended_models.json"]
 }

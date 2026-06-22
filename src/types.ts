@@ -22,6 +22,11 @@ export type AIProvider = "ollama" | "openrouter";
 export type Language = "en" | "ru";
 export type AIMode = "plan_day" | "create_tasks" | "replan_tasks" | "manage_tasks" | "full_agent";
 export type ReminderOffsetMinutes = 0 | 5 | 10 | 30 | 60;
+export type OverdueAutoCleanupMode = "off" | "archive" | "delete";
+export type McpAccessMode = "read-only" | "proposals" | "full-access";
+export type McpAuthenticationMode = "bearer" | "oauth";
+export type McpTunnelMode = "temporary" | "persistent";
+export type McpConnectionMode = "aevum-connect" | "quick-tunnel";
 
 export interface Subtask {
   id: string;
@@ -112,6 +117,15 @@ export interface UserSettings {
   onboardingCompleted: boolean;
   startupBehavior: "dashboard" | "today" | "last-view";
   autoPlanDay: boolean;
+  overdueAutoCleanupMode: OverdueAutoCleanupMode;
+  mcpEnabled: boolean;
+  mcpAccessMode: McpAccessMode;
+  mcpPort: number;
+  mcpAuthenticationMode: McpAuthenticationMode;
+  mcpRemoteUrl: string;
+  mcpTunnelMode: McpTunnelMode;
+  mcpConnectionMode: McpConnectionMode;
+  mcpRelayOrigin: string;
   telegramAssistantEnabled: boolean;
   telegramUseDefaultAI: boolean;
   telegramAIProvider: AIProvider;

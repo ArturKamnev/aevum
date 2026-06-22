@@ -2,12 +2,18 @@
   "name": "aevum",
   "version": "1.1.9",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "description": "Aevum desktop productivity assistant",
   "author": "ArturKamnev",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "tsc -p electron/tsconfig.json && concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc && vite build",
+    "dev:relay": "npm run dev --workspace @aevum/relay",
+    "build:relay": "npm run build --workspace @aevum/relay",
+    "start:relay": "npm run start --workspace @aevum/relay",
     "build:electron": "tsc -p electron/tsconfig.json",
     "dist": "npm run build && npm run build:electron && electron-builder --publish never",
     "release": "npm run build && npm run build:electron && electron-builder --publish always",
@@ -54,14 +60,18 @@
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "electron-updater": "^6.8.3",
     "gsap": "^3.15.0",
     "keytar": "^7.9.0",
     "lucide-react": "^0.556.0",
     "react": "^19.2.1",
-    "react-dom": "^19.2.1"
+    "react-dom": "^19.2.1",
+    "ws": "^8.21.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.0",
     "@types/node": "^24.10.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",

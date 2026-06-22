@@ -32,13 +32,15 @@ import {
   markAIActionAuditEntryUndone,
   saveAIActionAuditLog,
 } from "./services/aiActionAuditStore";
-import { AIProviderError, breakDownTaskWithAI, chatWithAssistant, getCleanLocalizedErrorMessage, type AssistantAction } from "./services/aiService";
+import { AIProviderError, breakDownTaskWithAI, chatWithAssistant, getCleanLocalizedErrorMessage, type AssistantAction, type ManageTaskOperation } from "./services/aiService";
 import { loadProjects, loadTasks, saveProjects, saveTasks } from "./services/localStore";
-import type { AIMode, AssistantMessage, CategoryDateFilter, Project, ReminderOffsetMinutes, SortMode, Task, TaskDraft, TaskStatus, UserSettings, ViewId } from "./types";
+import { migrateStoredMcpSettings } from "./services/mcpSettings";
+import type { AIMode, AssistantMessage, CategoryDateFilter, OverdueAutoCleanupMode, Project, ReminderOffsetMinutes, SortMode, Task, TaskDraft, TaskStatus, UserSettings, ViewId } from "./types";
 import { assignCategoryColor, isAevumCategoryColor } from "./utils/categoryColors";
 import { formatScheduleLabel, getTodayISO, getTomorrowISO, isScheduledAfterToday, isScheduledBeforeToday, isScheduledToday } from "./utils/date";
 import { createProjectId, createTaskId } from "./utils/id";
 import { getCategoryIdFromView } from "./utils/navigation";
+import { cleanupOverdueTasks } from "./utils/overdueCleanup";
 import { calculateNextRepeatAt, createNextRecurringTask } from "./utils/recurrence";
 
 const defaultSettings: UserSettings = {
@@ -55,6 +57,15 @@ const defaultSettings: UserSettings = {
   onboardingCompleted: false,
   startupBehavior: "dashboard",
   autoPlanDay: true,
+  overdueAutoCleanupMode: "off",
+  mcpEnabled: false,
+  mcpAccessMode: "read-only",
+  mcpPort: 3847,
+  mcpAuthenticationMode: "bearer",
+  mcpRemoteUrl: "",
+  mcpTunnelMode: "persistent",
+  mcpConnectionMode: "aevum-connect",
+  mcpRelayOrigin: "https://connect.aevum.app",
   telegramAssistantEnabled: false,
   telegramUseDefaultAI: true,
   telegramAIProvider: "ollama",
@@ -75,6 +86,11 @@ function loadSettings(theme: UserSettings["theme"], language: UserSettings["lang
     if (typeof parsed.cloudModel !== "string" || !cloudModelOptions.has(parsed.cloudModel)) {
       parsed.cloudModel = defaultSettings.cloudModel;
     }
+    if (!isOverdueAutoCleanupMode(parsed.overdueAutoCleanupMode)) {
+      parsed.overdueAutoCleanupMode = "off";
+    }
+    Object.assign(parsed, migrateStoredMcpSettings(parsed));
+    delete parsed.mcpAutoTunnel;
     return { ...defaultSettings, ...parsed, theme, language } as UserSettings;
   } catch {
     return { ...defaultSettings, theme, language };
@@ -114,12 +130,15 @@ export function App() {
   const [categoryDateFilter, setCategoryDateFilter] = useState<CategoryDateFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("deadline");
   const [isLoading] = useState(false);
+  const [isAICleanupBlocked, setIsAICleanupBlocked] = useState(false);
+  const [mcpPendingProposal, setMcpPendingProposal] = useState<AIActionProposal | null>(null);
   const tasksRef = useRef(tasks);
   const projectsRef = useRef(appProjects);
   const aiActionAuditLogRef = useRef(aiActionAuditLog);
   const settingsRef = useRef(settings);
   const proposalLedgerRef = useRef(createAIActionProposalLedger());
   const telegramProposalsRef = useRef(new Map<string, AIActionProposal>());
+  const mcpPendingProposalRef = useRef<AIActionProposal | null>(null);
   const telegramTemplateWizardsRef = useRef(new Map<number, TelegramTemplateWizard>());
   const activeCategoryId = getCategoryIdFromView(activeView);
   const activeCategory = activeCategoryId ? appProjects.find((project) => project.id === activeCategoryId) : undefined;
@@ -185,6 +204,55 @@ export function App() {
       defaultReminderMinutes: settings.defaultReminderMinutes,
     });
   }, [settings.defaultReminderMinutes, settings.notifications, tasks]);
+
+  useEffect(() => {
+    if (settings.overdueAutoCleanupMode === "off") return;
+
+    const runCleanup = () => {
+      const now = new Date();
+      for (const [proposalId, proposal] of telegramProposalsRef.current) {
+        if (proposal.expiresAt && proposal.expiresAt <= now.toISOString()) {
+          telegramProposalsRef.current.delete(proposalId);
+        }
+      }
+      const isBlocked =
+        isTaskModalOpen ||
+        Boolean(editingTask) ||
+        Boolean(taskPendingDelete) ||
+        !settings.onboardingCompleted ||
+        isAICleanupBlocked ||
+        Boolean(mcpPendingProposalRef.current) ||
+        telegramProposalsRef.current.size > 0;
+      if (isBlocked) return;
+
+      setTasks((currentTasks) => {
+        const cleanedTasks = cleanupOverdueTasks(currentTasks, settings.overdueAutoCleanupMode, now);
+        if (cleanedTasks !== currentTasks) tasksRef.current = cleanedTasks;
+        return cleanedTasks;
+      });
+    };
+
+    runCleanup();
+    const interval = window.setInterval(runCleanup, 60_000);
+    return () => window.clearInterval(interval);
+  }, [editingTask, isAICleanupBlocked, isTaskModalOpen, settings.onboardingCompleted, settings.overdueAutoCleanupMode, taskPendingDelete]);
+
+  useEffect(() => {
+    const quickTunnel = settings.mcpConnectionMode === "quick-tunnel";
+    void window.todoAI?.updateMcpSettings({
+      enabled: settings.mcpEnabled,
+      accessMode: settings.mcpAccessMode,
+      port: settings.mcpPort,
+      authenticationMode: quickTunnel ? "oauth" : "bearer",
+      remoteUrl: "",
+      tunnelMode: quickTunnel ? "temporary" : "persistent",
+    });
+    void window.todoAI?.updateAevumConnectSettings({
+      enabled: settings.mcpEnabled && !quickTunnel,
+      relayOrigin: settings.mcpRelayOrigin,
+      accessMode: settings.mcpAccessMode,
+    });
+  }, [settings.mcpAccessMode, settings.mcpConnectionMode, settings.mcpEnabled, settings.mcpPort, settings.mcpRelayOrigin]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -400,6 +468,77 @@ export function App() {
     );
     return result;
   }, [commitAITransaction]);
+
+  const resolveMcpProposal = useCallback((proposalId: string) => {
+    if (mcpPendingProposalRef.current?.id !== proposalId) return;
+    mcpPendingProposalRef.current = null;
+    setMcpPendingProposal(null);
+  }, []);
+
+  useEffect(() => {
+    const respond = (id: string, response: Omit<McpRendererResponsePayload, "id">) => {
+      void window.todoAI?.sendMcpRendererResponse({ id, ...response });
+    };
+    const removeSnapshotListener = window.todoAI?.onMcpSnapshotRequest(({ id }) => {
+      respond(id, {
+        ok: true,
+        data: {
+          tasks: tasksRef.current,
+          categories: projectsRef.current,
+          activity: aiActionAuditLogRef.current,
+          app: { ready: true, language: settingsRef.current.language },
+        },
+      });
+    });
+    const removeProposalListener = window.todoAI?.onMcpProposalRequest(({ id, payload }) => {
+      void (async () => {
+        if (mcpPendingProposalRef.current || isAICleanupBlocked || editingTask || isTaskModalOpen || taskPendingDelete) {
+          respond(id, { ok: true, data: { ok: false, message: "Aevum is busy with another confirmation or task edit." } });
+          return;
+        }
+        try {
+          const request = readMcpProposalRequest(payload);
+          if (!request) {
+            respond(id, { ok: true, data: { ok: false, message: "Invalid MCP proposal request." } });
+            return;
+          }
+          let action: AssistantAction | undefined;
+          if (request.kind === "task_changes") {
+            action = { type: "manage_tasks", operations: request.operations };
+          } else if (request.kind === "full_agent") {
+            const result = await chatWithAssistant(request.instruction, tasksRef.current, settingsRef.current, "full_agent", projectsRef.current);
+            setMessages((current) => [...current, result.message]);
+            action = result.action;
+          } else {
+            action = request.action;
+          }
+          const proposalResult = createAIActionProposal(action, "mcp", { tasks: tasksRef.current, projects: projectsRef.current }, { ttlMs: 10 * 60_000 });
+          if (!proposalResult.ok) {
+            respond(id, { ok: true, data: { ok: false, message: `Aevum rejected the proposal: ${proposalResult.reason}.` } });
+            return;
+          }
+          mcpPendingProposalRef.current = proposalResult.proposal;
+          setMcpPendingProposal(proposalResult.proposal);
+          setMessages((current) => [...current, {
+            id: `message-${Date.now()}-mcp-proposal`,
+            role: "system",
+            content: settingsRef.current.language === "ru" ? "MCP отправил предложение на подтверждение." : "MCP sent a proposal for confirmation.",
+            createdAt: new Date().toISOString(),
+            metadata: { actionType: proposalResult.proposal.actionType },
+          }]);
+          setActiveView("assistant");
+          respond(id, { ok: true, data: { ok: true, proposalId: proposalResult.proposal.id } });
+        } catch {
+          respond(id, { ok: true, data: { ok: false, message: "Aevum could not prepare the MCP proposal." } });
+        }
+      })();
+    });
+    void window.todoAI?.markMcpRendererReady();
+    return () => {
+      removeSnapshotListener?.();
+      removeProposalListener?.();
+    };
+  }, [editingTask, isAICleanupBlocked, isTaskModalOpen, taskPendingDelete]);
 
   useEffect(() => {
     void window.todoAI?.updateTelegramSettings({
@@ -787,6 +926,9 @@ export function App() {
             onCancelAIProposal={cancelAIProposal}
             onConfirmAIProposal={confirmAIProposal}
             onUndoAIAction={undoAIAction}
+            onCleanupBusyChange={setIsAICleanupBlocked}
+            externalProposal={mcpPendingProposal}
+            onExternalProposalResolved={resolveMcpProposal}
             projects={appProjects}
             setMessages={setMessages}
             settings={settings}
@@ -873,6 +1015,33 @@ export function App() {
       )}
     </>
   );
+}
+
+function isOverdueAutoCleanupMode(value: unknown): value is OverdueAutoCleanupMode {
+  return value === "off" || value === "archive" || value === "delete";
+}
+
+type McpProposalRequest =
+  | { kind: "task_changes"; operations: ManageTaskOperation[] }
+  | { kind: "full_agent"; instruction: string }
+  | { kind: "productivity_action"; action: AssistantAction };
+
+function readMcpProposalRequest(value: unknown): McpProposalRequest | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.kind === "full_agent" && typeof value.instruction === "string" && value.instruction.trim()) {
+    return { kind: "full_agent", instruction: value.instruction.trim() };
+  }
+  if (value.kind === "task_changes" && Array.isArray(value.operations) && value.operations.length > 0) {
+    return { kind: "task_changes", operations: value.operations as ManageTaskOperation[] };
+  }
+  if (value.kind === "productivity_action" && isRecord(value.action)) {
+    return { kind: "productivity_action", action: value.action as unknown as AssistantAction };
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 type TelegramIntent =

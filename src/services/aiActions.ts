@@ -18,7 +18,7 @@ import { getScheduleTime, normalizeScheduledAt } from "../utils/date";
 import { createProjectId, createTaskId } from "../utils/id";
 import { calculateNextRepeatAt, createNextRecurringTask, defaultRepeat, normalizeRepeat } from "../utils/recurrence";
 
-export type AIActionSource = "assistant" | "telegram";
+export type AIActionSource = "assistant" | "telegram" | "mcp";
 export type AIActionKind = "create" | "schedule" | "replan" | "manage" | "undo" | "batch";
 export type AIActionFailureReason =
   | "missing_action"

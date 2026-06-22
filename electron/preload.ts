@@ -59,4 +59,36 @@ contextBridge.exposeInMainWorld("todoAI", {
     ipcRenderer.on("telegram:callback-request", listener);
     return () => ipcRenderer.removeListener("telegram:callback-request", listener);
   },
+  getMcpStatus: () => ipcRenderer.invoke("mcp:get-status"),
+  updateMcpSettings: (settings: unknown) => ipcRenderer.invoke("mcp:update-settings", settings),
+  getMcpToken: () => ipcRenderer.invoke("mcp:get-token"),
+  regenerateMcpToken: () => ipcRenderer.invoke("mcp:regenerate-token"),
+  markMcpRendererReady: () => ipcRenderer.invoke("mcp:renderer-ready"),
+  sendMcpRendererResponse: (payload: unknown) => ipcRenderer.invoke("mcp:renderer-response", payload),
+  onMcpStatus: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("mcp:status", listener);
+    return () => ipcRenderer.removeListener("mcp:status", listener);
+  },
+  onMcpSnapshotRequest: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("mcp:snapshot-request", listener);
+    return () => ipcRenderer.removeListener("mcp:snapshot-request", listener);
+  },
+  onMcpProposalRequest: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("mcp:proposal-request", listener);
+    return () => ipcRenderer.removeListener("mcp:proposal-request", listener);
+  },
+  getAevumConnectStatus: () => ipcRenderer.invoke("aevum-connect:get-status"),
+  updateAevumConnectSettings: (settings: unknown) => ipcRenderer.invoke("aevum-connect:update-settings", settings),
+  resetAevumConnect: () => ipcRenderer.invoke("aevum-connect:reset"),
+  listAevumConnectClients: () => ipcRenderer.invoke("aevum-connect:list-clients"),
+  revokeAevumConnectClient: (clientId: string) => ipcRenderer.invoke("aevum-connect:revoke-client", clientId),
+  revokeAllAevumConnectClients: () => ipcRenderer.invoke("aevum-connect:revoke-all"),
+  onAevumConnectStatus: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("aevum-connect:status", listener);
+    return () => ipcRenderer.removeListener("aevum-connect:status", listener);
+  },
 });

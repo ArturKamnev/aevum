@@ -90,7 +90,7 @@ function migrateAuditEntry(value: unknown): AIActionAuditEntry | undefined {
   if (!isRecord(value)) return undefined;
   if (value.schemaVersion !== auditSchemaVersion) return undefined;
   if (typeof value.transactionId !== "string") return undefined;
-  if (value.source !== "assistant" && value.source !== "telegram") return undefined;
+  if (value.source !== "assistant" && value.source !== "telegram" && value.source !== "mcp") return undefined;
   if (!isActionKind(value.actionKind)) return undefined;
   if (typeof value.createdAt !== "string" || typeof value.confirmedAt !== "string" || typeof value.appliedAt !== "string") return undefined;
   if (!isAuditStatus(value.status)) return undefined;

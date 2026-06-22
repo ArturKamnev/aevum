@@ -36,6 +36,22 @@ interface Window {
     onTelegramMessageRequest: (callback: (payload: TelegramMessageRequestPayload) => void) => () => void;
     onTelegramDecisionRequest: (callback: (payload: TelegramDecisionRequestPayload) => void) => () => void;
     onTelegramCallbackRequest: (callback: (payload: TelegramCallbackRequestPayload) => void) => () => void;
+    getMcpStatus: () => Promise<McpStatusResult>;
+    updateMcpSettings: (settings: McpSettingsPayload) => Promise<McpStatusResult>;
+    getMcpToken: () => Promise<{ ok: boolean; token: string }>;
+    regenerateMcpToken: () => Promise<{ ok: boolean; token: string; status: McpStatusResult }>;
+    markMcpRendererReady: () => Promise<{ ok: boolean }>;
+    sendMcpRendererResponse: (payload: McpRendererResponsePayload) => Promise<{ ok: boolean }>;
+    onMcpStatus: (callback: (payload: McpStatusResult) => void) => () => void;
+    onMcpSnapshotRequest: (callback: (payload: McpRendererRequestPayload) => void) => () => void;
+    onMcpProposalRequest: (callback: (payload: McpRendererRequestPayload) => void) => () => void;
+    getAevumConnectStatus: () => Promise<AevumConnectStatusResult>;
+    updateAevumConnectSettings: (settings: AevumConnectSettingsPayload) => Promise<AevumConnectStatusResult>;
+    resetAevumConnect: () => Promise<AevumConnectStatusResult>;
+    listAevumConnectClients: () => Promise<AevumConnectAuthorizedClient[]>;
+    revokeAevumConnectClient: (clientId: string) => Promise<boolean>;
+    revokeAllAevumConnectClients: () => Promise<boolean>;
+    onAevumConnectStatus: (callback: (payload: AevumConnectStatusResult) => void) => () => void;
   };
 }
 
@@ -171,3 +187,54 @@ type TelegramRendererResponsePayload = {
   id: string;
   response: TelegramRendererResponse;
 };
+
+type McpAccessMode = "read-only" | "proposals" | "full-access";
+type McpServerState = "disabled" | "starting" | "running" | "error";
+type McpAuthenticationMode = "bearer" | "oauth";
+type McpTunnelMode = "temporary" | "persistent";
+type McpSettingsPayload = { enabled: boolean; accessMode: McpAccessMode; port: number; authenticationMode: McpAuthenticationMode; remoteUrl: string; tunnelMode: McpTunnelMode };
+type McpStatusResult = McpSettingsPayload & {
+  status: McpServerState;
+  endpoint: string;
+  hasToken: boolean;
+  remoteEndpoint?: string;
+  oauth: {
+    currentStage?: "pending_browser_consent" | "pending_native_approval" | "approved" | "denied" | "expired" | "consumed";
+    activeSessionCount: number;
+    registeredClientCount: number;
+    activeGrantCount: number;
+    lastGrantedScopes?: string[];
+    lastError?: string;
+    lastRedirectStatus?: string;
+  };
+  toolAccess: {
+    selectedMode: McpAccessMode;
+    grantedScopes: string[];
+    registeredClientCount: number;
+    activeGrantCount: number;
+    writeToolsExposed: boolean;
+    lastToolListMode?: McpAccessMode;
+    lastToolError?: string;
+  };
+  tunnel: {
+    state: "disabled" | "starting" | "running" | "error" | "missing";
+    origin?: string;
+    connectorUrl?: string;
+    error?: string;
+  };
+  message?: string;
+};
+type McpRendererRequestPayload = { id: string; payload: unknown };
+type McpRendererResponsePayload = { id: string; ok: boolean; data?: unknown; message?: string };
+type AevumConnectSettingsPayload = { enabled: boolean; relayOrigin: string; accessMode: McpAccessMode };
+type AevumConnectStatusResult = {
+  state: "disabled" | "connecting" | "connected" | "offline" | "error";
+  enabled: boolean;
+  relayOrigin: string;
+  accessMode: McpAccessMode;
+  connectorUrl?: string;
+  devicePublicId?: string;
+  message?: string;
+  clients?: AevumConnectAuthorizedClient[];
+};
+type AevumConnectAuthorizedClient = { clientId: string; name: string; scopes: string[]; createdAt: string; lastUsedAt?: string };
