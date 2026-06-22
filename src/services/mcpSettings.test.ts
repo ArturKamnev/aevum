@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { migrateStoredMcpSettings, normalizeMcpPublicOrigin } from "./mcpSettings";
+import { aevumConnectDisplayValue, migrateStoredMcpSettings, normalizeMcpPublicOrigin, normalizeMcpRelayOrigin } from "./mcpSettings";
 
 describe("MCP settings migration", () => {
   it("migrates old auto-tunnel settings to temporary mode", () => {
@@ -28,5 +28,13 @@ describe("MCP settings migration", () => {
     expect(normalizeMcpPublicOrigin("http://aevum.example.com")).toBeUndefined();
     expect(normalizeMcpPublicOrigin("https://aevum.example.com/mcp")).toBeUndefined();
     expect(normalizeMcpPublicOrigin("https://user:pass@aevum.example.com")).toBeUndefined();
+  });
+
+  it("keeps Aevum Connect origins and placeholders separate from Quick Tunnel", () => {
+    expect(normalizeMcpRelayOrigin("https://relay.up.railway.app/")).toBe("https://relay.up.railway.app");
+    expect(normalizeMcpRelayOrigin("https://relay.example/mcp")).toBeUndefined();
+    expect(normalizeMcpRelayOrigin("http://localhost:3000", true)).toBe("http://localhost:3000");
+    expect(aevumConnectDisplayValue({ relayOrigin: "https://connect.aevum.app", connectorUrl: "https://connect.aevum.app/mcp/device" }, { missingOrigin: "Enter Aevum Relay URL", creatingIdentity: "Creating personal MCP URL..." })).toBe("https://connect.aevum.app/mcp/device");
+    expect(aevumConnectDisplayValue({ relayOrigin: "https://connect.aevum.app" }, { missingOrigin: "Quick Tunnel placeholder", creatingIdentity: "Creating personal MCP URL..." })).not.toContain("Quick Tunnel");
   });
 });

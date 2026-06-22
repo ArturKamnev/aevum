@@ -29,7 +29,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { AvailabilityBlock, AIProvider, Language, McpAccessMode, McpConnectionMode, McpTunnelMode, OverdueAutoCleanupMode, ReminderOffsetMinutes, ThemeMode, TimeFormat, UserSettings } from "../types";
-import { normalizeMcpPublicOrigin } from "../services/mcpSettings";
+import { aevumConnectDisplayValue, normalizeMcpPublicOrigin, normalizeMcpRelayOrigin } from "../services/mcpSettings";
 import { createAvailabilityId } from "../utils/id";
 import { SettingsHelpPopover } from "./SettingsHelpPopover";
 import recommendedModelsJson from "../../electron/recommended_models.json";
@@ -103,6 +103,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const [mcpNotice, setMcpNotice] = useState("");
   const [mcpPortDraft, setMcpPortDraft] = useState(String(settings.mcpPort));
   const [mcpRemoteUrlDraft, setMcpRemoteUrlDraft] = useState(settings.mcpRemoteUrl);
+  const [mcpRelayOriginDraft, setMcpRelayOriginDraft] = useState(settings.mcpRelayOrigin);
 
   const installedModels = ollamaStatus?.models ?? [];
   const selectedModelInstalled = ollamaStatus?.selectedModelInstalled ?? installedModels.some((model) => model.name === settings.localModel);
@@ -240,6 +241,14 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
     }
   }
 
+  function commitMcpRelayOrigin() {
+    const normalized = normalizeMcpRelayOrigin(mcpRelayOriginDraft, import.meta.env.DEV);
+    if (!normalized) return setMcpNotice(t("settings.mcpInvalidRelayOrigin"));
+    setMcpRelayOriginDraft(normalized);
+    updateSettings({ mcpRelayOrigin: normalized });
+    setMcpNotice("");
+  }
+
   function updateMcpAccessMode(accessMode: McpAccessMode) {
     updateSettings({ mcpAccessMode: accessMode });
     setMcpNotice(t("settings.mcpReconnectRequired"));
@@ -248,6 +257,8 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   useEffect(() => {
     setMcpRemoteUrlDraft(settings.mcpRemoteUrl);
   }, [settings.mcpRemoteUrl]);
+
+  useEffect(() => setMcpRelayOriginDraft(settings.mcpRelayOrigin), [settings.mcpRelayOrigin]);
 
   useEffect(() => {
     setCustomModel(settings.localModel);
@@ -592,14 +603,17 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             {settings.mcpConnectionMode === "quick-tunnel" ? <label className="field-row">
               <span>{t("settings.mcpPort")}</span>
               <input type="number" min={1024} max={65535} value={mcpPortDraft} onChange={(event) => setMcpPortDraft(event.target.value)} onBlur={commitMcpPort} />
-            </label> : null}
+            </label> : <label className="field-row">
+              <span>{t("settings.mcpRelayOrigin")}</span>
+              <input value={mcpRelayOriginDraft} onChange={(event) => setMcpRelayOriginDraft(event.target.value)} onBlur={commitMcpRelayOrigin} placeholder="https://connect.aevum.app" />
+            </label>}
           </div>
           {settings.mcpConnectionMode === "quick-tunnel" ? (
             <p className="mcp-temporary-note"><Clock3 size={13} />{t("settings.mcpQuickTunnelTemporary")}</p>
           ) : null}
           <div className="mcp-endpoint-list">
             {settings.mcpConnectionMode === "aevum-connect" ? (
-              <div><span>{t("settings.mcpConnectorUrl")}</span><code>{aevumConnectStatus?.connectorUrl ?? t("settings.mcpRemoteEndpointPending")}</code></div>
+              <div><span>{t("settings.mcpConnectorUrl")}</span><code>{aevumConnectDisplayValue(aevumConnectStatus, { missingOrigin: t("settings.mcpRelayOriginMissing"), creatingIdentity: t("settings.mcpCreatingPersonalUrl") })}</code></div>
             ) : (
               <>
                 <div><span>{t("settings.mcpTunnelStatus")}</span><span className={`status-pill status-pill--${mcpTunnelStatusTone(mcpStatus?.tunnel.state, "temporary", Boolean(mcpStatus?.remoteEndpoint))}`}>{formatMcpTunnelStatus(mcpStatus?.tunnel.state, t, "temporary", Boolean(mcpStatus?.remoteEndpoint))}</span></div>
@@ -627,6 +641,20 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             </div>) : <p>{t("settings.mcpNoConnectedClients")}</p>}
             {(aevumConnectStatus?.clients ?? []).length ? <button className="button button--secondary" onClick={() => void revokeAllAevumConnectClients()} type="button">{t("settings.mcpRevokeAll")}</button> : null}
           </div>
+        </details> : null}
+        {settings.mcpConnectionMode === "aevum-connect" ? <details className="mcp-security-details">
+          <summary><Info size={15} />{t("settings.mcpConnectDiagnostics")}</summary>
+          <dl className="mcp-diagnostics">
+            <div><dt>{t("settings.mcpConnectionMode")}</dt><dd>{t("settings.mcpAevumConnect")}</dd></div>
+            <div><dt>{t("settings.mcpRelayOrigin")}</dt><dd>{aevumConnectStatus?.relayOrigin || t("settings.mcpRelayOriginMissing")}</dd></div>
+            <div><dt>{t("settings.mcpWebSocketUrl")}</dt><dd>{aevumConnectStatus?.webSocketUrl || "—"}</dd></div>
+            <div><dt>{t("settings.mcpDevicePreview")}</dt><dd>{aevumConnectStatus?.devicePublicIdPreview || "—"}</dd></div>
+            <div><dt>{t("settings.mcpStatus")}</dt><dd>{formatAevumConnectStatus(aevumConnectStatus?.state, t)}</dd></div>
+            <div><dt>{t("settings.mcpLastReconnectReason")}</dt><dd>{aevumConnectStatus?.lastReconnectReason || "—"}</dd></div>
+            <div><dt>{t("settings.mcpLastSafeError")}</dt><dd>{aevumConnectStatus?.lastSafeError || "—"}</dd></div>
+            <div><dt>{t("settings.mcpLastConnectedAt")}</dt><dd>{aevumConnectStatus?.lastConnectedAt || "—"}</dd></div>
+            <div><dt>{t("settings.mcpConnectorAvailable")}</dt><dd>{aevumConnectStatus?.connectorUrlAvailable ? t("settings.mcpYes") : t("settings.mcpNo")}</dd></div>
+          </dl>
         </details> : null}
         <details className="mcp-security-details">
           <summary><ShieldCheck size={15} />{t("settings.mcpSecurityDetails")}</summary>

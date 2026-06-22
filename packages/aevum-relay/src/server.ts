@@ -377,6 +377,7 @@ class DeviceHub {
   }
 
   accept(socket: WebSocket) {
+    log("info", "device_connect_attempt");
     let connection: DeviceConnection | undefined;
     const authTimer = setTimeout(() => socket.close(4401, "Device authentication timed out"), 10_000);
     socket.on("pong", () => { if (connection) connection.alive = true; });
@@ -388,7 +389,10 @@ class DeviceHub {
       const message = validation.data;
       if (!connection) {
         if (message.type !== "device_register") return socket.close(4401, "Authentication required");
-        connection = await this.authenticate(socket, message).catch(() => undefined);
+        connection = await this.authenticate(socket, message).catch((error) => {
+          log("warn", "device_auth_failed", { deviceIdSuffix: message.devicePublicId.slice(-6), error: safeError(error) });
+          return undefined;
+        });
         if (!connection) return socket.close(4403, "Device authentication failed");
         clearTimeout(authTimer);
         return;
@@ -405,6 +409,7 @@ class DeviceHub {
       clearTimeout(authTimer);
       if (connection && this.devices.get(connection.devicePublicId)?.socket === socket) this.devices.delete(connection.devicePublicId);
       if (connection) this.rejectDevicePending(connection.devicePublicId, "offline");
+      if (connection) log("info", "device_disconnected", { deviceIdSuffix: connection.devicePublicId.slice(-6) });
     });
     socket.on("error", () => undefined);
   }
@@ -423,6 +428,7 @@ class DeviceHub {
       await this.database.query("UPDATE relay_devices SET access_mode=$2,last_seen_at=NOW() WHERE device_public_id=$1", [message.devicePublicId, message.accessMode]);
     }
     const previous = this.devices.get(message.devicePublicId);
+    if (existing) log("info", "device_reconnect", { deviceIdSuffix: message.devicePublicId.slice(-6) });
     if (previous && previous.socket !== socket) previous.socket.close(4409, "Replaced by a newer device connection");
     const connection = { socket, devicePublicId: message.devicePublicId, accessMode: message.accessMode, alive: true };
     this.devices.set(message.devicePublicId, connection);

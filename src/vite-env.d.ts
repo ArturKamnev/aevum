@@ -226,7 +226,7 @@ type McpStatusResult = McpSettingsPayload & {
 };
 type McpRendererRequestPayload = { id: string; payload: unknown };
 type McpRendererResponsePayload = { id: string; ok: boolean; data?: unknown; message?: string };
-type AevumConnectSettingsPayload = { enabled: boolean; relayOrigin: string; accessMode: McpAccessMode };
+type AevumConnectSettingsPayload = { enabled: boolean; relayOrigin: string; accessMode: McpAccessMode; provisionIdentity?: boolean };
 type AevumConnectStatusResult = {
   state: "disabled" | "connecting" | "connected" | "offline" | "error";
   enabled: boolean;
@@ -234,6 +234,12 @@ type AevumConnectStatusResult = {
   accessMode: McpAccessMode;
   connectorUrl?: string;
   devicePublicId?: string;
+  webSocketUrl?: string;
+  devicePublicIdPreview?: string;
+  lastReconnectReason?: string;
+  lastSafeError?: string;
+  lastConnectedAt?: string;
+  connectorUrlAvailable: boolean;
   message?: string;
   clients?: AevumConnectAuthorizedClient[];
 };

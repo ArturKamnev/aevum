@@ -34,7 +34,7 @@ import {
 } from "./services/aiActionAuditStore";
 import { AIProviderError, breakDownTaskWithAI, chatWithAssistant, getCleanLocalizedErrorMessage, type AssistantAction, type ManageTaskOperation } from "./services/aiService";
 import { loadProjects, loadTasks, saveProjects, saveTasks } from "./services/localStore";
-import { migrateStoredMcpSettings } from "./services/mcpSettings";
+import { defaultMcpRelayOrigin, migrateStoredMcpSettings } from "./services/mcpSettings";
 import type { AIMode, AssistantMessage, CategoryDateFilter, OverdueAutoCleanupMode, Project, ReminderOffsetMinutes, SortMode, Task, TaskDraft, TaskStatus, UserSettings, ViewId } from "./types";
 import { assignCategoryColor, isAevumCategoryColor } from "./utils/categoryColors";
 import { formatScheduleLabel, getTodayISO, getTomorrowISO, isScheduledAfterToday, isScheduledBeforeToday, isScheduledToday } from "./utils/date";
@@ -65,7 +65,7 @@ const defaultSettings: UserSettings = {
   mcpRemoteUrl: "",
   mcpTunnelMode: "persistent",
   mcpConnectionMode: "aevum-connect",
-  mcpRelayOrigin: "https://connect.aevum.app",
+  mcpRelayOrigin: defaultMcpRelayOrigin,
   telegramAssistantEnabled: false,
   telegramUseDefaultAI: true,
   telegramAIProvider: "ollama",
@@ -251,6 +251,7 @@ export function App() {
       enabled: settings.mcpEnabled && !quickTunnel,
       relayOrigin: settings.mcpRelayOrigin,
       accessMode: settings.mcpAccessMode,
+      provisionIdentity: !quickTunnel,
     });
   }, [settings.mcpAccessMode, settings.mcpConnectionMode, settings.mcpEnabled, settings.mcpPort, settings.mcpRelayOrigin]);
 

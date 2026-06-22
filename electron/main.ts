@@ -110,6 +110,7 @@ const aevumConnectClient = new AevumConnectClient({
   handleMcpRequest: (payload, scopes) => mcpService.handleRelayRequest(payload, scopes),
   confirmOAuthAccess,
   onStatus: (status) => broadcast("aevum-connect:status", status),
+  allowInsecureRelay: isDev,
 });
 
 async function confirmOAuthAccess({ clientName, redirectUri, scopes }: { clientName: string; redirectUri: string; scopes: string[] }) {
@@ -225,6 +226,7 @@ app.whenReady().then(() => {
       enabled: settings.enabled === true,
       relayOrigin: typeof settings.relayOrigin === "string" ? settings.relayOrigin : "",
       accessMode: settings.accessMode === "full-access" ? "full-access" : settings.accessMode === "proposals" ? "proposals" : "read-only",
+      provisionIdentity: settings.provisionIdentity === true,
     });
   });
   ipcMain.handle("aevum-connect:reset", () => aevumConnectClient.resetIdentity());

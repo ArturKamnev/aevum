@@ -1,5 +1,7 @@
 import type { McpAccessMode, McpAuthenticationMode, McpConnectionMode, McpTunnelMode } from "../types";
 
+export const defaultMcpRelayOrigin = normalizeMcpRelayOrigin(import.meta.env.VITE_AEVUM_RELAY_ORIGIN ?? "") ?? "https://connect.aevum.app";
+
 export type StoredMcpSettings = {
   mcpEnabled: boolean;
   mcpAccessMode: McpAccessMode;
@@ -34,7 +36,7 @@ export function migrateStoredMcpSettings(value: Record<string, unknown>): Stored
     mcpConnectionMode: connectionMode,
     mcpRelayOrigin: typeof value.mcpRelayOrigin === "string" && normalizeMcpPublicOrigin(value.mcpRelayOrigin)
       ? normalizeMcpPublicOrigin(value.mcpRelayOrigin)!
-      : "https://connect.aevum.app",
+      : defaultMcpRelayOrigin,
   };
 }
 
@@ -47,4 +49,21 @@ export function normalizeMcpPublicOrigin(value: string) {
   } catch {
     return undefined;
   }
+}
+
+export function normalizeMcpRelayOrigin(value: string, allowHttp = false) {
+  try {
+    const url = new URL(value.trim());
+    if ((url.protocol !== "https:" && !(allowHttp && url.protocol === "http:")) || url.username || url.password || url.search || url.hash) return undefined;
+    if (url.pathname !== "/" && url.pathname !== "") return undefined;
+    return url.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+export function aevumConnectDisplayValue(status: { relayOrigin?: string; connectorUrl?: string } | null, placeholders: { missingOrigin: string; creatingIdentity: string }) {
+  if (status?.connectorUrl) return status.connectorUrl;
+  if (!status?.relayOrigin) return placeholders.missingOrigin;
+  return placeholders.creatingIdentity;
 }
