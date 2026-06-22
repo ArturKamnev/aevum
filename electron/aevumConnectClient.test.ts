@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { AevumConnectClient, buildConnectorUrl, buildRelayWebSocketUrl, normalizeRelayOrigin, type AevumConnectIdentity } from "./aevumConnectClient";
+import { AEVUM_CONNECT_RELAY_ORIGIN, AevumConnectClient, buildConnectorUrl, buildRelayWebSocketUrl, normalizeRelayOrigin, type AevumConnectIdentity } from "./aevumConnectClient";
 
 class PendingSocket extends EventEmitter {
   readyState = WebSocket.CONNECTING;
@@ -43,6 +43,7 @@ describe("Aevum Connect client", () => {
     expect(buildRelayWebSocketUrl("https://connect.aevum.app")).toBe("wss://connect.aevum.app/device/connect");
     expect(buildRelayWebSocketUrl("http://localhost:3000")).toBe("ws://localhost:3000/device/connect");
     expect(buildConnectorUrl("https://connect.aevum.app/", identity.devicePublicId)).toBe(`https://connect.aevum.app/mcp/${identity.devicePublicId}`);
+    expect(buildRelayWebSocketUrl(AEVUM_CONNECT_RELAY_ORIGIN)).toBe("wss://aevumrelay-production.up.railway.app/device/connect");
   });
 
   it("regenerates corrupted identities and rotates the URL immediately", async () => {

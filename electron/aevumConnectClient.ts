@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto";
 import WebSocket from "ws";
 import { parseRelayDesktopMessage, type AevumConnectAccessMode, type DesktopRelayMessage } from "./aevumConnectProtocol";
 
+export const AEVUM_CONNECT_RELAY_ORIGIN = "https://aevumrelay-production.up.railway.app";
+
 export type AevumConnectIdentity = { devicePublicId: string; deviceSecret: string };
 export type AevumConnectState = "disabled" | "connecting" | "connected" | "offline" | "error";
 export type AevumConnectStatus = {
@@ -19,8 +21,10 @@ export type AevumConnectStatus = {
   connectorUrlAvailable: boolean;
   message?: string;
   clients?: AevumConnectAuthorizedClient[];
+  oauthDiagnostics?: AevumConnectOAuthDiagnostics;
 };
 export type AevumConnectAuthorizedClient = { clientId: string; name: string; scopes: string[]; createdAt: string; lastUsedAt?: string };
+export type AevumConnectOAuthDiagnostics = { lastOAuthStage?: string; lastTokenError?: string; grantFound?: boolean; refreshRotationSuccess?: boolean; updatedAt?: string };
 
 export type AevumConnectSettings = { enabled: boolean; relayOrigin: string; accessMode: AevumConnectAccessMode; provisionIdentity?: boolean };
 export type AevumConnectDependencies = {
@@ -64,7 +68,8 @@ export class AevumConnectClient {
     if (!this.identity || !this.settings.relayOrigin) return [];
     const response = await this.deviceRequest(`/device/${this.identity.devicePublicId}/clients`, "GET");
     const clients = isRecord(response) && Array.isArray(response.clients) ? response.clients.filter(isAuthorizedClient) : [];
-    this.setStatus({ ...this.status, clients });
+    const oauthDiagnostics = isRecord(response) && isOAuthDiagnostics(response.diagnostics) ? response.diagnostics : undefined;
+    this.setStatus({ ...this.status, clients, oauthDiagnostics });
     return clients;
   }
 
@@ -225,3 +230,4 @@ function validIdentity(value: AevumConnectIdentity) { return /^[A-Za-z0-9_-]{24,
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number) { return new Promise<T>((resolve, reject) => { const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs); promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); }); }); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isAuthorizedClient(value: unknown): value is AevumConnectAuthorizedClient { return isRecord(value) && typeof value.clientId === "string" && typeof value.name === "string" && Array.isArray(value.scopes) && value.scopes.every((scope) => typeof scope === "string") && typeof value.createdAt === "string"; }
+function isOAuthDiagnostics(value: unknown): value is AevumConnectOAuthDiagnostics { return isRecord(value) && (!value.lastOAuthStage || typeof value.lastOAuthStage === "string") && (!value.lastTokenError || typeof value.lastTokenError === "string"); }

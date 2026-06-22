@@ -10,10 +10,12 @@ describe("relay security", () => {
   });
 
   it("signs short-lived device-bound access tokens", () => {
-    const claims = { version: 1 as const, devicePublicId: "device", clientId: "client", grantId: "grant", scopes: ["mcp:read"], issuedAt: 1_000, expiresAt: 2_000 };
+    const claims = { version: 1 as const, devicePublicId: "device", clientId: "client", grantId: "grant", scopes: ["mcp:read"], issuedAt: 1_000, expiresAt: 2_000, issuer: "https://relay.example", audience: "https://relay.example/mcp/device" };
     const token = signAccessToken(claims, "signing-secret");
     expect(verifyAccessToken(token, "signing-secret", 1_500)).toEqual(claims);
     expect(verifyAccessToken(token, "wrong-secret", 1_500)).toBeUndefined();
     expect(verifyAccessToken(token, "signing-secret", 2_001)).toBeUndefined();
+    expect(verifyAccessToken(token, "signing-secret", 1_500, { issuer: claims.issuer, audience: claims.audience })).toEqual(claims);
+    expect(verifyAccessToken(token, "signing-secret", 1_500, { issuer: claims.issuer, audience: "https://relay.example/mcp/other" })).toBeUndefined();
   });
 });

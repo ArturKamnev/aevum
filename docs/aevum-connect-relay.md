@@ -66,3 +66,8 @@ Production checklist:
 - Revoke one client, revoke all clients, and reset the personal URL; verify old tokens and the old URL stop working.
 
 Quick Tunnel remains available under the advanced connection mode for temporary testing. Its URL can change after every restart and is not the production Aevum Connect path.
+# Production connection defaults
+
+Aevum Connect uses `https://aevumrelay-production.up.railway.app` in packaged builds. The connector URL is computed as `/mcp/<devicePublicId>` and the desktop WebSocket endpoint as `wss://aevumrelay-production.up.railway.app/device/connect`. A development-only `AEVUM_CONNECT_RELAY_ORIGIN` override may be used by an unpackaged desktop build.
+
+OAuth access tokens live for 15 minutes. Rotating refresh-token families live for 60 days; each successful refresh returns a new refresh token and permanently consumes the old one. OAuth clients, grants, hashed refresh tokens, families, revocations, devices, and safe diagnostics are PostgreSQL-backed and survive relay/desktop restarts. The relay never stores tasks, prompts, or application secrets.

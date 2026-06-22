@@ -330,11 +330,17 @@ describe.sequential("Aevum local MCP service", () => {
     const before = JSON.stringify(harness.snapshot);
     const result = await fullClient.callTool({
       name: "create_tasks",
-      arguments: { tasks: [{ title: "Created through MCP" }] },
+      arguments: { tasks: [{ title: "Created through MCP" }], idempotencyKey: "create-task-request-1" },
     });
     expect(result.structuredContent).toMatchObject({ proposalId: "proposal-1", status: "awaiting_confirmation" });
     expect(Array.isArray(result.structuredContent)).toBe(false);
     expect(harness.proposals).toEqual([{ kind: "productivity_action", action: { type: "create_tasks", tasks: [{ title: "Created through MCP" }] } }]);
+    const replay = await fullClient.callTool({
+      name: "create_tasks",
+      arguments: { tasks: [{ title: "Created through MCP" }], idempotencyKey: "create-task-request-1" },
+    });
+    expect(replay.structuredContent).toMatchObject({ proposalId: "proposal-1", status: "awaiting_confirmation" });
+    expect(harness.proposals).toHaveLength(1);
     expect(JSON.stringify(harness.snapshot)).toBe(before);
     const writeCalls = [
       ["update_task", { taskId: "task-1", changes: { title: "Updated" } }],

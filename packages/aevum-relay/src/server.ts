@@ -4,15 +4,15 @@ import { URLSearchParams } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import type { RelayConfig } from "./config.js";
 import type { RelayDatabase } from "./database.js";
-import { accessModeSchema, desktopMessageSchema, scopesForMode, type AccessMode, type RelayMessage } from "./protocol.js";
+import { accessModeSchema, desktopMessageSchema, isAccessModeExpansion, scopesForMode, type AccessMode, type RelayMessage } from "./protocol.js";
 import { hashSecret, randomToken, safeHashEqual, signAccessToken, verifyAccessToken, verifyPkceS256 } from "./security.js";
 
-const mcpTimeoutMs = 30_000;
+const mcpTimeoutMs = 12_000;
 const approvalTimeoutMs = 3 * 60_000;
 const codeTtlMs = 2 * 60_000;
 const sessionTtlMs = 10 * 60_000;
 const accessTokenTtlMs = 15 * 60_000;
-const refreshTokenTtlMs = 30 * 24 * 60 * 60_000;
+const refreshTokenFamilyTtlMs = 60 * 24 * 60 * 60_000;
 const maxHttpBodyBytes = 512 * 1024;
 
 type PendingRequest = { devicePublicId: string; timer: NodeJS.Timeout; resolve: (value: unknown) => void; reject: (error: Error) => void };
@@ -112,7 +112,12 @@ async function listDeviceClients(request: IncomingMessage, response: ServerRespo
      WHERE g.device_public_id=$1 AND g.revoked_at IS NULL ORDER BY g.last_used_at DESC NULLS LAST`,
     [devicePublicId],
   );
-  sendJson(response, 200, { clients: result.rows.map((row) => ({ clientId: row.client_id, name: row.client_name, scopes: row.scopes, createdAt: row.created_at, lastUsedAt: row.last_used_at })), count: result.rowCount ?? 0 });
+  const diagnostics = (await context.database.query("SELECT last_oauth_stage,last_token_error,grant_found,last_refresh_rotation_success,updated_at FROM oauth_diagnostics WHERE device_public_id=$1", [devicePublicId])).rows[0];
+  sendJson(response, 200, {
+    clients: result.rows.map((row) => ({ clientId: row.client_id, name: row.client_name, scopes: row.scopes, createdAt: row.created_at, lastUsedAt: row.last_used_at })),
+    count: result.rowCount ?? 0,
+    diagnostics: diagnostics ? { lastOAuthStage: diagnostics.last_oauth_stage, lastTokenError: diagnostics.last_token_error, grantFound: diagnostics.grant_found, refreshRotationSuccess: diagnostics.last_refresh_rotation_success, updatedAt: diagnostics.updated_at } : undefined,
+  });
 }
 
 async function revokeDeviceClient(request: IncomingMessage, response: ServerResponse, context: RouteContext, devicePublicId: string, clientId: string) {
@@ -201,6 +206,7 @@ async function authorize(_request: IncomingMessage, response: ServerResponse, co
   if (!requested.includes("mcp:read") || requested.some((scope) => !allowed.includes(scope))) return redirectOAuthError(response, redirectUri, state, "invalid_scope");
 
   const grant = (await context.database.query("SELECT * FROM oauth_grants WHERE device_public_id=$1 AND client_id=$2 AND revoked_at IS NULL", [devicePublicId, clientId])).rows[0];
+  await updateOAuthDiagnostics(context.database, devicePublicId, { stage: grant ? "grant_reuse_checked" : "grant_creation_required", grantFound: Boolean(grant) });
   if (grant && requested.every((scope) => (grant.scopes as string[]).includes(scope))) {
     const code = await createAuthorizationCode(context, { devicePublicId, clientId, redirectUri, scopes: requested, codeChallenge, sessionId: `reuse-${randomToken(18)}` });
     return redirectWithCode(response, redirectUri, state, code);
@@ -294,6 +300,7 @@ async function exchangeAuthorizationCode(response: ServerResponse, context: Rout
     const tokens = await createTokenPair(client, context.config, grant, randomToken(24));
     await client.query("COMMIT");
     sendJson(response, 200, tokens);
+    void updateOAuthDiagnostics(context.database, grant.device_public_id, { stage: "authorization_code_exchanged", tokenError: null }).catch(() => undefined);
   } catch {
     await client.query("ROLLBACK");
     sendOAuthError(response, 400, "invalid_grant", "Invalid or expired authorization code.");
@@ -308,31 +315,34 @@ async function exchangeRefreshToken(response: ServerResponse, context: RouteCont
   try {
     await client.query("BEGIN");
     const token = (await client.query("SELECT r.*,g.device_public_id,g.client_id,g.scopes,g.revoked_at AS grant_revoked_at FROM refresh_tokens r JOIN oauth_grants g ON g.grant_id=r.grant_id WHERE r.token_hash=$1 FOR UPDATE", [hash])).rows[0];
-    if (!token || token.client_id !== clientId || token.revoked_at || token.grant_revoked_at || new Date(token.expires_at).getTime() <= Date.now()) throw new Error("invalid_grant");
+    if (!token || (clientId && token.client_id !== clientId) || token.revoked_at || token.grant_revoked_at || new Date(token.expires_at).getTime() <= Date.now() || new Date(token.family_expires_at).getTime() <= Date.now()) throw new Error("invalid_grant");
     if (token.consumed_at) {
       await client.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE family_id=$1", [token.family_id]);
       await client.query("UPDATE oauth_grants SET revoked_at=NOW() WHERE grant_id=$1", [token.grant_id]);
       await client.query("COMMIT");
+      void updateOAuthDiagnostics(context.database, token.device_public_id, { stage: "refresh_token_reuse_rejected", tokenError: "refresh_token_reused", refreshRotationSuccess: false }).catch(() => undefined);
       return sendOAuthError(response, 400, "invalid_grant", "Invalid, expired, or reused refresh token.");
     }
     await client.query("UPDATE refresh_tokens SET consumed_at=NOW(),last_used_at=NOW() WHERE token_hash=$1", [hash]);
     await client.query("UPDATE oauth_grants SET last_used_at=NOW() WHERE grant_id=$1", [token.grant_id]);
-    const tokens = await createTokenPair(client, context.config, token, token.family_id);
+    const tokens = await createTokenPair(client, context.config, token, token.family_id, new Date(token.family_expires_at));
     await client.query("COMMIT");
     sendJson(response, 200, tokens);
+    void updateOAuthDiagnostics(context.database, token.device_public_id, { stage: "refresh_token_rotated", tokenError: null, grantFound: true, refreshRotationSuccess: true }).catch(() => undefined);
   } catch {
     await client.query("ROLLBACK");
     sendOAuthError(response, 400, "invalid_grant", "Invalid, expired, or reused refresh token.");
   } finally { client.release(); }
 }
 
-async function createTokenPair(client: { query: RelayDatabase["query"] }, config: RelayConfig, grant: Record<string, any>, familyId: string) {
+async function createTokenPair(client: { query: RelayDatabase["query"] }, config: RelayConfig, grant: Record<string, any>, familyId: string, familyExpiresAt = new Date(Date.now() + refreshTokenFamilyTtlMs)) {
   const now = Date.now();
   const refreshToken = randomToken(48);
-  await client.query("INSERT INTO refresh_tokens(token_hash,family_id,grant_id,expires_at) VALUES($1,$2,$3,$4)", [hashSecret(refreshToken, config.tokenSecret), familyId, grant.grant_id, new Date(now + refreshTokenTtlMs)]);
+  await client.query("INSERT INTO refresh_tokens(token_hash,family_id,grant_id,expires_at,family_expires_at) VALUES($1,$2,$3,$4,$5)", [hashSecret(refreshToken, config.tokenSecret), familyId, grant.grant_id, familyExpiresAt, familyExpiresAt]);
   const accessToken = signAccessToken({
     version: 1, devicePublicId: grant.device_public_id, clientId: grant.client_id, grantId: grant.grant_id,
     scopes: grant.scopes, issuedAt: now, expiresAt: now + accessTokenTtlMs,
+    issuer: config.publicOrigin, audience: `${config.publicOrigin}/mcp/${grant.device_public_id}`,
   }, config.signingSecret);
   return { access_token: accessToken, refresh_token: refreshToken, token_type: "Bearer", expires_in: accessTokenTtlMs / 1000, scope: (grant.scopes as string[]).join(" ") };
 }
@@ -350,15 +360,18 @@ async function revokeToken(request: IncomingMessage, response: ServerResponse, c
 
 async function forwardMcp(request: IncomingMessage, response: ServerResponse, context: RouteContext, devicePublicId: string) {
   const token = bearerToken(request);
-  const claims = token ? verifyAccessToken(token, context.config.signingSecret) : undefined;
+  const audience = `${context.config.publicOrigin}/mcp/${devicePublicId}`;
+  const claims = token ? verifyAccessToken(token, context.config.signingSecret, Date.now(), { issuer: context.config.publicOrigin, audience }) : undefined;
   if (!claims || claims.devicePublicId !== devicePublicId || !claims.scopes.includes("mcp:read")) return unauthorized(response, context, devicePublicId);
-  const grant = (await context.database.query("SELECT 1 FROM oauth_grants g JOIN relay_devices d ON d.device_public_id=g.device_public_id WHERE g.grant_id=$1 AND g.revoked_at IS NULL AND d.revoked_at IS NULL", [claims.grantId])).rows[0];
+  const grant = (await context.database.query("SELECT g.scopes,d.access_mode FROM oauth_grants g JOIN relay_devices d ON d.device_public_id=g.device_public_id WHERE g.grant_id=$1 AND g.client_id=$2 AND g.device_public_id=$3 AND g.revoked_at IS NULL AND d.revoked_at IS NULL", [claims.grantId, claims.clientId, devicePublicId])).rows[0];
   if (!grant) return unauthorized(response, context, devicePublicId);
   if (!context.hub.isOnline(devicePublicId)) return sendJson(response, 503, rpcError(null, -32004, "Aevum device is offline."));
   const payload = await readJson(request);
   const id = isRecord(payload) && (typeof payload.id === "string" || typeof payload.id === "number") ? payload.id : null;
   try {
-    const result = await context.hub.requestMcp(devicePublicId, claims.scopes, payload);
+    const allowedNow = scopesForMode(accessModeSchema.parse(grant.access_mode));
+    const effectiveScopes = claims.scopes.filter((scope) => allowedNow.includes(scope) && (grant.scopes as string[]).includes(scope));
+    const result = await context.hub.requestMcp(devicePublicId, effectiveScopes, payload);
     sendJson(response, 200, result);
   } catch (error) {
     const timedOut = error instanceof Error && error.message === "timeout";
@@ -421,9 +434,12 @@ class DeviceHub {
     if (existing && (existing.revoked_at || !safeHashEqual(message.deviceSecret, existing.device_secret_hash, this.config.tokenSecret))) throw new Error("invalid_device");
     if (!existing) await this.database.query("INSERT INTO relay_devices(device_public_id,device_secret_hash,access_mode) VALUES($1,$2,$3)", [message.devicePublicId, secretHash, message.accessMode]);
     else {
-      if (existing.access_mode !== message.accessMode) {
+      if (existing.access_mode !== message.accessMode && isAccessModeExpansion(accessModeSchema.parse(existing.access_mode), message.accessMode)) {
         await this.database.query("UPDATE oauth_grants SET revoked_at=NOW() WHERE device_public_id=$1 AND revoked_at IS NULL", [message.devicePublicId]);
         await this.database.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE grant_id IN (SELECT grant_id FROM oauth_grants WHERE device_public_id=$1)", [message.devicePublicId]);
+      } else if (existing.access_mode !== message.accessMode) {
+        const reducedScopes = scopesForMode(message.accessMode);
+        await this.database.query("UPDATE oauth_grants SET scopes=$2::jsonb WHERE device_public_id=$1 AND revoked_at IS NULL", [message.devicePublicId, JSON.stringify(reducedScopes)]);
       }
       await this.database.query("UPDATE relay_devices SET access_mode=$2,last_seen_at=NOW() WHERE device_public_id=$1", [message.devicePublicId, message.accessMode]);
     }
@@ -498,6 +514,19 @@ class DeviceHub {
   private send(socket: WebSocket | undefined, message: RelayMessage) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
+}
+
+async function updateOAuthDiagnostics(database: RelayDatabase, devicePublicId: string, value: { stage?: string; tokenError?: string | null; grantFound?: boolean; refreshRotationSuccess?: boolean }) {
+  await database.query(
+    `INSERT INTO oauth_diagnostics(device_public_id,last_oauth_stage,last_token_error,grant_found,last_refresh_rotation_success)
+     VALUES($1,$2,$3,$4,$5)
+     ON CONFLICT(device_public_id) DO UPDATE SET
+       last_oauth_stage=COALESCE(EXCLUDED.last_oauth_stage,oauth_diagnostics.last_oauth_stage),
+       last_token_error=EXCLUDED.last_token_error,
+       grant_found=COALESCE(EXCLUDED.grant_found,oauth_diagnostics.grant_found),
+       last_refresh_rotation_success=COALESCE(EXCLUDED.last_refresh_rotation_success,oauth_diagnostics.last_refresh_rotation_success),updated_at=NOW()`,
+    [devicePublicId, value.stage ?? null, value.tokenError ?? null, value.grantFound ?? null, value.refreshRotationSuccess ?? null],
+  );
 }
 
 async function getActiveDevice(database: RelayDatabase, devicePublicId: string) {

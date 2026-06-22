@@ -8,6 +8,8 @@ export type AccessTokenClaims = {
   scopes: string[];
   issuedAt: number;
   expiresAt: number;
+  issuer?: string;
+  audience?: string;
 };
 
 export function randomToken(bytes = 32) {
@@ -30,7 +32,7 @@ export function signAccessToken(claims: AccessTokenClaims, signingSecret: string
   return `${payload}.${signature}`;
 }
 
-export function verifyAccessToken(token: string, signingSecret: string, now = Date.now()): AccessTokenClaims | undefined {
+export function verifyAccessToken(token: string, signingSecret: string, now = Date.now(), expectedClaims?: { issuer: string; audience: string }): AccessTokenClaims | undefined {
   const [payload, signature, extra] = token.split(".");
   if (!payload || !signature || extra) return undefined;
   const expected = createHmac("sha256", signingSecret).update(payload).digest("base64url");
@@ -41,6 +43,7 @@ export function verifyAccessToken(token: string, signingSecret: string, now = Da
     const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as AccessTokenClaims;
     if (claims.version !== 1 || !Array.isArray(claims.scopes) || claims.expiresAt <= now) return undefined;
     if (!claims.devicePublicId || !claims.clientId || !claims.grantId) return undefined;
+    if (expectedClaims && ((claims.issuer && claims.issuer !== expectedClaims.issuer) || (claims.audience && claims.audience !== expectedClaims.audience))) return undefined;
     return claims;
   } catch {
     return undefined;

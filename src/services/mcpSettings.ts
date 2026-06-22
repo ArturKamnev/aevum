@@ -1,6 +1,8 @@
 import type { McpAccessMode, McpAuthenticationMode, McpConnectionMode, McpTunnelMode } from "../types";
 
-export const defaultMcpRelayOrigin = normalizeMcpRelayOrigin(import.meta.env.VITE_AEVUM_RELAY_ORIGIN ?? "") ?? "https://connect.aevum.app";
+export const AEVUM_CONNECT_RELAY_ORIGIN = "https://aevumrelay-production.up.railway.app";
+const developmentRelayOverride = import.meta.env.DEV ? normalizeMcpRelayOrigin(import.meta.env.VITE_AEVUM_RELAY_ORIGIN ?? "", true) : undefined;
+export const defaultMcpRelayOrigin = developmentRelayOverride ?? AEVUM_CONNECT_RELAY_ORIGIN;
 
 export type StoredMcpSettings = {
   mcpEnabled: boolean;
@@ -34,9 +36,7 @@ export function migrateStoredMcpSettings(value: Record<string, unknown>): Stored
     mcpRemoteUrl: typeof value.mcpRemoteUrl === "string" ? value.mcpRemoteUrl : "",
     mcpTunnelMode: tunnelMode,
     mcpConnectionMode: connectionMode,
-    mcpRelayOrigin: typeof value.mcpRelayOrigin === "string" && normalizeMcpPublicOrigin(value.mcpRelayOrigin)
-      ? normalizeMcpPublicOrigin(value.mcpRelayOrigin)!
-      : defaultMcpRelayOrigin,
+    mcpRelayOrigin: defaultMcpRelayOrigin,
   };
 }
 

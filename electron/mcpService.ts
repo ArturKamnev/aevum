@@ -5,7 +5,7 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { Server } from "node:http";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod/v4";
@@ -78,6 +78,8 @@ export class AevumMcpService {
   private lastToolError = "";
   private readonly quickTunnel: CloudflareQuickTunnel;
   private tunnelStatus: CloudflareTunnelStatus = { state: "disabled" };
+  private readonly toolListCache = new Map<McpAccessMode, unknown>();
+  private readonly writeReplayCache = new Map<string, { fingerprint: string; expiresAt: number; result: { ok: boolean; proposalId?: string; message?: string } }>();
 
   constructor(private readonly dependencies: McpServiceDependencies) {
     this.quickTunnel = dependencies.quickTunnel ?? new CloudflareQuickTunnel();
@@ -149,6 +151,12 @@ export class AevumMcpService {
     const id = request && (typeof request.id === "string" || typeof request.id === "number") ? request.id : null;
     if (!request || request.jsonrpc !== "2.0" || typeof request.method !== "string") return relayRpcError(id, -32600, "Invalid MCP request.");
     if (request.method === "notifications/initialized") return { jsonrpc: "2.0", result: {} };
+    const toolMode = resolveToolListMode(this.settings.accessMode, scopes);
+    if (request.method === "tools/list" && this.toolListCache.has(toolMode)) {
+      this.lastToolListMode = toolMode;
+      this.lastToolListScopes = [...scopes];
+      return { jsonrpc: "2.0", id, result: this.toolListCache.get(toolMode) };
+    }
 
     const protocolServer = this.createProtocolServer(scopes);
     const client = new Client({ name: "aevum-connect-bridge", version: "1.0.0" });
@@ -166,7 +174,12 @@ export class AevumMcpService {
           instructions: client.getInstructions(),
         };
       } else if (request.method === "ping") result = await client.ping();
-      else if (request.method === "tools/list") result = await client.listTools(params);
+      else if (request.method === "tools/list") {
+        result = await client.listTools(params);
+        this.toolListCache.set(toolMode, result);
+        this.lastToolListMode = toolMode;
+        this.lastToolListScopes = [...scopes];
+      }
       else if (request.method === "tools/call") {
         if (typeof params.name !== "string") return relayRpcError(id, -32602, "Tool name is required.");
         if ("arguments" in params && !isRecord(params.arguments)) return relayRpcError(id, -32602, "Tool arguments must be a JSON object.");
@@ -342,25 +355,37 @@ export class AevumMcpService {
 
     resource("today-tasks", "aevum://tasks/today", "Active tasks scheduled today or overdue.", (snapshot) => taskCollection(todayTasks(snapshot.tasks)));
     resource("upcoming-tasks", "aevum://tasks/upcoming", "Active tasks scheduled after today.", (snapshot) => taskCollection(upcomingTasks(snapshot.tasks)));
-    resource("all-tasks", "aevum://tasks/all", "All sanitized Aevum tasks.", (snapshot) => taskCollection(snapshot.tasks));
+    resource("all-tasks", "aevum://tasks/all", "Up to 100 sanitized Aevum tasks. Use search_tasks to find a specific task.", (snapshot) => taskCollection(snapshot.tasks, 100));
     resource("categories", "aevum://categories", "Sanitized Aevum categories.", (snapshot) => ({ categories: snapshot.categories, count: snapshot.categories.length }));
     resource("recent-activity", "aevum://activity/recent", "Recent confirmed action summaries.", (snapshot) => ({ activity: snapshot.activity, count: snapshot.activity.length }));
     resource("app-status", "aevum://app/status", "Safe Aevum integration status.", (snapshot) => ({ ...snapshot.app, mcpAccessMode: this.settings.accessMode }));
 
-    registerJsonTool(server, "get_today_tasks", "Get active tasks scheduled today or overdue.", {}, async () => taskCollection(todayTasks((await this.snapshot()).tasks)));
-    registerJsonTool(server, "get_upcoming_tasks", "Get active tasks scheduled after today.", {}, async () => taskCollection(upcomingTasks((await this.snapshot()).tasks)));
-    registerJsonTool(server, "search_tasks", "Search task titles, descriptions, and tags.", {
+    registerJsonTool(server, "get_today_tasks", "List a compact page of active tasks due today or overdue. Use search_tasks when the user identifies a task by words.", {
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).max(10_000).optional(),
+    }, async ({ limit = 20, offset = 0 }) => taskCollection(todayTasks((await this.snapshot()).tasks), limit, offset));
+    registerJsonTool(server, "get_upcoming_tasks", "List a compact page of active future tasks. Use search_tasks before changing a task.", {
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).max(10_000).optional(),
+    }, async ({ limit = 20, offset = 0 }) => taskCollection(upcomingTasks((await this.snapshot()).tasks), limit, offset));
+    registerJsonTool(server, "search_tasks", "Find tasks by title, short description, or tag before reading or changing them. Returns compact task identities and never guesses among matches.", {
       query: z.string().trim().min(1).max(200),
-    }, async ({ query }) => {
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).max(10_000).optional(),
+    }, async ({ query, limit = 20, offset = 0 }) => {
       const normalized = query.toLocaleLowerCase();
-      const tasks = (await this.snapshot()).tasks.filter((task) =>
+      const snapshot = await this.snapshot();
+      const tasks = snapshot.tasks.filter((task) =>
         [task.title, task.description, ...task.tags].some((value) => value.toLocaleLowerCase().includes(normalized)),
       );
-      return { query, tasks, count: tasks.length };
+      return { query, ...taskCollection(tasks, limit, offset, snapshot.categories) };
     });
-    registerJsonTool(server, "get_task_details", "Get one sanitized task by ID.", {
+    registerJsonTool(server, "get_task_details", "Get one task by its exact user-facing ID after search_tasks identifies it.", {
       taskId: z.string().trim().min(1).max(200),
-    }, async ({ taskId }) => (await this.snapshot()).tasks.find((task) => task.id === taskId) ?? { error: "Task not found." });
+    }, async ({ taskId }) => {
+      const task = (await this.snapshot()).tasks.find((item) => item.id === taskId);
+      return task ? { task, found: true } : { taskId, found: false, error: "Task not found. Search again before changing anything." };
+    });
     registerJsonTool(server, "get_categories", "Get sanitized categories.", {}, async () => {
       const categories = (await this.snapshot()).categories;
       return { categories, count: categories.length };
@@ -412,44 +437,66 @@ export class AevumMcpService {
         durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
         reminderMinutes: reminderSchema,
       };
-      const submitAction = (action: unknown) => this.dependencies.requestProposal({ kind: "productivity_action", action }).then(proposalResponse);
+      const idempotencyKeySchema = z.string().trim().min(8).max(200).optional().describe("Stable unique key for safely retrying the same write request.");
+      const submitAction = (action: unknown, idempotencyKey?: string) => this.submitReplaySafeAction(action, idempotencyKey).then(proposalResponse);
 
       registerJsonTool(server, "create_tasks", "Create one or more tasks after confirmation in Aevum.", {
         tasks: z.array(taskDraftSchema).min(1).max(100),
-      }, async ({ tasks }) => submitAction({ type: "create_tasks", tasks }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ tasks, idempotencyKey }) => submitAction({ type: "create_tasks", tasks }, idempotencyKey));
       registerJsonTool(server, "update_task", "Edit a task after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         changes: z.strictObject(editableTaskFields).refine((changes) => Object.keys(changes).length > 0),
-      }, async ({ taskId, changes }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes }] }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, changes, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes }] }, idempotencyKey));
       registerJsonTool(server, "reschedule_task", "Move or reschedule a task after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         scheduledAt: z.string().max(40).nullable(),
         durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
-      }, async ({ taskId, scheduledAt, durationMinutes }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes: { scheduledAt, ...(durationMinutes === undefined ? {} : { durationMinutes }) } }] }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, scheduledAt, durationMinutes, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes: { scheduledAt, ...(durationMinutes === undefined ? {} : { durationMinutes }) } }] }, idempotencyKey));
       registerJsonTool(server, "set_task_status", "Complete or reopen a task after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         status: z.enum(["active", "completed"]),
-      }, async ({ taskId, status }) => submitAction({ type: "manage_tasks", operations: [{ operation: "set_status", taskId, status }] }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, status, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "set_status", taskId, status }] }, idempotencyKey));
       registerJsonTool(server, "delete_task", "Delete a task after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
-      }, async ({ taskId }) => submitAction({ type: "manage_tasks", operations: [{ operation: "delete", taskId }] }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "delete", taskId }] }, idempotencyKey));
       registerJsonTool(server, "assign_task_to_category", "Assign a task to a category after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         categoryId: z.string().trim().min(1).max(200),
-      }, async ({ taskId, categoryId }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes: { projectId: categoryId } }] }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, categoryId, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes: { projectId: categoryId } }] }, idempotencyKey));
       registerJsonTool(server, "create_category", "Create a task category after confirmation in Aevum.", {
         name: z.string().trim().min(1).max(200),
-      }, async ({ name }) => submitAction({ type: "batch_action", categoriesToCreate: [{ ref: "mcp-category", name }] }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ name, idempotencyKey }) => submitAction({ type: "batch_action", categoriesToCreate: [{ ref: "mcp-category", name }] }, idempotencyKey));
       registerJsonTool(server, "rename_category", "Rename a task category after confirmation in Aevum.", {
         categoryId: z.string().trim().min(1).max(200),
         name: z.string().trim().min(1).max(200),
-      }, async ({ categoryId, name }) => submitAction({ type: "batch_action", categoriesToRename: [{ categoryId, newName: name }] }));
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ categoryId, name, idempotencyKey }) => submitAction({ type: "batch_action", categoriesToRename: [{ categoryId, newName: name }] }, idempotencyKey));
     }
     return server;
   }
 
   private async snapshot() {
     return sanitizeSnapshot(await this.dependencies.requestSnapshot());
+  }
+
+  private async submitReplaySafeAction(action: unknown, idempotencyKey?: string) {
+    if (!idempotencyKey) return this.dependencies.requestProposal({ kind: "productivity_action", action });
+    const now = Date.now();
+    for (const [key, entry] of this.writeReplayCache) if (entry.expiresAt <= now) this.writeReplayCache.delete(key);
+    const fingerprint = createHash("sha256").update(JSON.stringify(action)).digest("base64url");
+    const existing = this.writeReplayCache.get(idempotencyKey);
+    if (existing) return existing.fingerprint === fingerprint ? existing.result : { ok: false, message: "This idempotency key was already used for a different write." };
+    const result = await this.dependencies.requestProposal({ kind: "productivity_action", action });
+    this.writeReplayCache.set(idempotencyKey, { fingerprint, expiresAt: now + 10 * 60_000, result });
+    if (this.writeReplayCache.size > 500) this.writeReplayCache.delete(this.writeReplayCache.keys().next().value!);
+    return result;
   }
 
   private async ensureToken() {
@@ -502,8 +549,21 @@ function proposalResponse(result: { ok: boolean; proposalId?: string; message?: 
   return { proposalId: result.proposalId ?? "", status: "awaiting_confirmation", message: "Proposal sent to Aevum for user confirmation. No changes have been applied." };
 }
 
-function taskCollection(tasks: SafeTask[]) {
-  return { tasks, count: tasks.length };
+function taskCollection(tasks: SafeTask[], limit = 20, offset = 0, categories: SafeSnapshot["categories"] = []) {
+  const page = tasks.slice(offset, offset + limit).map((task) => compactTask(task, categories));
+  return { tasks: page, count: page.length, total: tasks.length, offset, limit, hasMore: offset + page.length < tasks.length };
+}
+
+function compactTask(task: SafeTask, categories: SafeSnapshot["categories"]) {
+  const category = categories.find((item) => item.id === task.projectId);
+  return {
+    id: task.id,
+    title: task.title,
+    scheduledAt: task.scheduledAt,
+    status: task.status,
+    category: category ? { id: category.id, name: category.name } : { id: task.projectId },
+    description: task.description.length > 280 ? `${task.description.slice(0, 277)}...` : task.description,
+  };
 }
 
 type SafeTask = {

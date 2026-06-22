@@ -75,6 +75,17 @@ export async function migrateDatabase(database: RelayDatabase) {
       consumed_at TIMESTAMPTZ,
       revoked_at TIMESTAMPTZ
     );
+    ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS family_expires_at TIMESTAMPTZ;
+    UPDATE refresh_tokens SET family_expires_at=expires_at WHERE family_expires_at IS NULL;
+    ALTER TABLE refresh_tokens ALTER COLUMN family_expires_at SET NOT NULL;
+    CREATE TABLE IF NOT EXISTS oauth_diagnostics (
+      device_public_id TEXT PRIMARY KEY REFERENCES relay_devices(device_public_id) ON DELETE CASCADE,
+      last_oauth_stage TEXT,
+      last_token_error TEXT,
+      grant_found BOOLEAN,
+      last_refresh_rotation_success BOOLEAN,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
     CREATE INDEX IF NOT EXISTS refresh_tokens_family_idx ON refresh_tokens(family_id);
     CREATE INDEX IF NOT EXISTS oauth_sessions_device_idx ON oauth_sessions(device_public_id);
     CREATE INDEX IF NOT EXISTS oauth_grants_device_idx ON oauth_grants(device_public_id);

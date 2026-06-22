@@ -9,9 +9,10 @@ import path from "node:path";
 import recommendedModelsJson from "./recommended_models.json";
 import { TelegramBridge, type TelegramBridgeSettings } from "./telegramService";
 import { AevumMcpService, type McpProposalRequest } from "./mcpService";
-import { AevumConnectClient, type AevumConnectIdentity } from "./aevumConnectClient";
+import { AEVUM_CONNECT_RELAY_ORIGIN, AevumConnectClient, normalizeRelayOrigin, type AevumConnectIdentity } from "./aevumConnectClient";
 
 const isDev = !app.isPackaged;
+const aevumConnectRelayOrigin = isDev ? normalizeRelayOrigin(process.env.AEVUM_CONNECT_RELAY_ORIGIN ?? AEVUM_CONNECT_RELAY_ORIGIN, true) || AEVUM_CONNECT_RELAY_ORIGIN : AEVUM_CONNECT_RELAY_ORIGIN;
 const ollamaDownloadUrl = "https://ollama.com/download";
 const allowedExternalLinks = new Set([
   ollamaDownloadUrl,
@@ -224,7 +225,7 @@ app.whenReady().then(() => {
     if (!isRecord(settings)) return aevumConnectClient.getStatus();
     return aevumConnectClient.updateSettings({
       enabled: settings.enabled === true,
-      relayOrigin: typeof settings.relayOrigin === "string" ? settings.relayOrigin : "",
+      relayOrigin: aevumConnectRelayOrigin,
       accessMode: settings.accessMode === "full-access" ? "full-access" : settings.accessMode === "proposals" ? "proposals" : "read-only",
       provisionIdentity: settings.provisionIdentity === true,
     });

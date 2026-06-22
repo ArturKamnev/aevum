@@ -32,3 +32,8 @@ export function scopesForMode(mode: AccessMode) {
   if (mode === "proposals") return ["mcp:read", "mcp:propose"];
   return ["mcp:read"];
 }
+
+export function isAccessModeExpansion(previous: AccessMode, next: AccessMode) {
+  const rank: Record<AccessMode, number> = { "read-only": 0, proposals: 1, "full-access": 2 };
+  return rank[next] > rank[previous];
+}

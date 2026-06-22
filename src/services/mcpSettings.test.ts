@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aevumConnectDisplayValue, migrateStoredMcpSettings, normalizeMcpPublicOrigin, normalizeMcpRelayOrigin } from "./mcpSettings";
+import { AEVUM_CONNECT_RELAY_ORIGIN, aevumConnectDisplayValue, migrateStoredMcpSettings, normalizeMcpPublicOrigin, normalizeMcpRelayOrigin } from "./mcpSettings";
 
 describe("MCP settings migration", () => {
   it("migrates old auto-tunnel settings to temporary mode", () => {
@@ -12,8 +12,12 @@ describe("MCP settings migration", () => {
   it("defaults to Aevum Connect with the production relay origin", () => {
     expect(migrateStoredMcpSettings({})).toMatchObject({
       mcpConnectionMode: "aevum-connect",
-      mcpRelayOrigin: "https://connect.aevum.app",
+      mcpRelayOrigin: AEVUM_CONNECT_RELAY_ORIGIN,
     });
+  });
+
+  it("replaces stored relay origins with the fixed production origin", () => {
+    expect(migrateStoredMcpSettings({ mcpRelayOrigin: "https://old.example" }).mcpRelayOrigin).toBe(AEVUM_CONNECT_RELAY_ORIGIN);
   });
 
   it("preserves explicit tunnel and full-access modes", () => {
