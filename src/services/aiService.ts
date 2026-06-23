@@ -20,11 +20,30 @@ export type AICategoryTarget =
 export interface AICategoryDraft {
   ref: string;
   name: string;
+  color?: string;
+  description?: string;
 }
 
 export interface CategoryRenameDraft {
   categoryId: string;
   newName: string;
+}
+
+export interface CategoryUpdateDraft {
+  categoryId: string;
+  name?: string;
+  color?: string;
+  description?: string;
+}
+
+export type CategoryDeleteStrategy =
+  | { mode: "move_tasks_to_uncategorized" }
+  | { mode: "move_tasks_to_category"; targetCategoryId: string }
+  | { mode: "delete_tasks_too"; confirmTaskDeletion: true };
+
+export interface CategoryDeleteDraft {
+  categoryId: string;
+  strategy: CategoryDeleteStrategy;
 }
 
 export interface AIConnectionResult {
@@ -45,6 +64,7 @@ export interface AITaskDraft {
   projectName?: string;
   categoryTarget?: AICategoryTarget;
   tags?: string[];
+  subtasks?: Array<{ title: string; completed?: boolean }>;
 }
 
 export interface CreateTasksAction {
@@ -72,6 +92,9 @@ export interface ManageTaskChanges {
   durationMinutes?: number | null;
   reminderMinutes?: ReminderOffsetMinutes | null;
   projectId?: string;
+  repeat?: RepeatRule;
+  tags?: string[];
+  subtasks?: Task["subtasks"];
 }
 
 export interface ManageTaskUpdateOperation {
@@ -105,6 +128,8 @@ export interface BatchAction {
   type: "batch_action";
   categoriesToCreate?: AICategoryDraft[];
   categoriesToRename?: CategoryRenameDraft[];
+  categoriesToUpdate?: CategoryUpdateDraft[];
+  categoriesToDelete?: CategoryDeleteDraft[];
   tasksToCreate?: AITaskDraft[];
   scheduleChanges?: ScheduleChangeDraft[];
   manageOperations?: ManageTaskOperation[];
@@ -1934,4 +1959,3 @@ ${projectSummary || "No categories yet."}
 Unavailable blocks:
 ${availabilitySummary || "No unavailable blocks."}`;
 }
-

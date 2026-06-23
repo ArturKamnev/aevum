@@ -4,7 +4,9 @@ import type {
   AITaskDraft,
   AssistantAction,
   BatchAction,
+  CategoryDeleteDraft,
   CategoryRenameDraft,
+  CategoryUpdateDraft,
   CreateTasksAction,
   ManageTaskChanges,
   ManageTaskOperation,
@@ -15,7 +17,7 @@ import type {
 import type { Project, ReminderOffsetMinutes, RepeatRule, Task } from "../types";
 import { assignCategoryColor } from "../utils/categoryColors";
 import { getScheduleTime, normalizeScheduledAt } from "../utils/date";
-import { createProjectId, createTaskId } from "../utils/id";
+import { createProjectId, createSubtaskId, createTaskId } from "../utils/id";
 import { calculateNextRepeatAt, createNextRecurringTask, defaultRepeat, normalizeRepeat } from "../utils/recurrence";
 
 export type AIActionSource = "assistant" | "telegram" | "mcp";
@@ -315,6 +317,8 @@ export function buildAIActionTransaction(
   const updatedTaskIds: string[] = [];
   const createdProjectIds: string[] = [];
   const renamedProjectIds: string[] = [];
+  const updatedProjectIds: string[] = [];
+  const deletedProjectIds: string[] = [];
 
   const taskIds = new Set(workingTasks.map((task) => task.id));
   const projectIds = new Set(workingProjects.map((project) => project.id));
@@ -401,8 +405,8 @@ export function buildAIActionTransaction(
         const newProject: Project = {
           id,
           name: cat.name,
-          description: "Created by Aevum.",
-          color: assignCategoryColor(workingProjects),
+          description: cat.description ?? "Created by Aevum.",
+          color: cat.color ?? assignCategoryColor(workingProjects),
         };
         workingProjects.push(newProject);
         createdProjectIds.push(id);
@@ -420,6 +424,47 @@ export function buildAIActionTransaction(
           };
           renamedProjectIds.push(rename.categoryId);
         }
+      }
+    }
+
+    if (normalized.action.categoriesToUpdate) {
+      for (const update of normalized.action.categoriesToUpdate) {
+        const index = workingProjects.findIndex((p) => p.id === update.categoryId);
+        if (index >= 0) {
+          workingProjects[index] = {
+            ...workingProjects[index],
+            ...(update.name === undefined ? {} : { name: update.name }),
+            ...(update.color === undefined ? {} : { color: update.color }),
+            ...(update.description === undefined ? {} : { description: update.description }),
+          };
+          updatedProjectIds.push(update.categoryId);
+        }
+      }
+    }
+
+    if (normalized.action.categoriesToDelete) {
+      for (const deletion of normalized.action.categoriesToDelete) {
+        const index = workingProjects.findIndex((p) => p.id === deletion.categoryId);
+        if (index < 0) return { ok: false, reason: "missing_project" };
+
+        if (deletion.strategy.mode === "delete_tasks_too") {
+          const remainingTasks = workingTasks.filter((task) => task.projectId !== deletion.categoryId);
+          deletedTaskIds.push(...workingTasks.filter((task) => task.projectId === deletion.categoryId).map((task) => task.id));
+          workingTasks.splice(0, workingTasks.length, ...remainingTasks);
+        } else {
+          const targetProjectId = deletion.strategy.mode === "move_tasks_to_category"
+            ? deletion.strategy.targetCategoryId
+            : "uncategorized";
+          for (let taskIndex = 0; taskIndex < workingTasks.length; taskIndex += 1) {
+            const task = workingTasks[taskIndex];
+            if (task.projectId !== deletion.categoryId) continue;
+            workingTasks[taskIndex] = { ...task, projectId: targetProjectId, updatedAt: now };
+            updatedTaskIds.push(task.id);
+          }
+        }
+
+        workingProjects.splice(index, 1);
+        deletedProjectIds.push(deletion.categoryId);
       }
     }
 
@@ -517,7 +562,12 @@ export function buildAIActionTransaction(
     ...deletedTaskIds,
     ...updatedTaskIds,
   ], generatedRecurringTaskIds);
-  const projectPatches = buildProjectPatches(beforeProjects, workingProjects, [...createdProjectIds, ...renamedProjectIds]);
+  const projectPatches = buildProjectPatches(beforeProjects, workingProjects, [
+    ...createdProjectIds,
+    ...renamedProjectIds,
+    ...updatedProjectIds,
+    ...deletedProjectIds,
+  ]);
   const summary = createTransactionSummary(normalized.action, taskPatches, projectPatches, state);
 
   return {
@@ -595,6 +645,10 @@ export function createUndoAIActionTransaction(
       workingProjects = workingProjects.map((project) =>
         project.id === patch.projectId ? cloneProject(patch.before as Project) : project
       );
+    } else if (patch.change === "deleted" && patch.before) {
+      if (!workingProjects.some((project) => project.id === patch.projectId)) {
+        workingProjects = [cloneProject(patch.before), ...workingProjects];
+      }
     }
   }
 
@@ -660,6 +714,9 @@ export function getAIActionUndoAvailability(entry: AIActionAuditEntry, state: AI
     } else if (patch.change === "updated" && patch.after) {
       const current = state.projects.find((project) => project.id === patch.projectId);
       if (!current || !sameProject(current, patch.after)) return { available: false, reason: "conflict" };
+    } else if (patch.change === "deleted") {
+      const current = state.projects.find((project) => project.id === patch.projectId);
+      if (current) return { available: false, reason: "conflict" };
     }
   }
 
@@ -755,7 +812,11 @@ function normalizeBatchAction(
 ): { ok: true; action: BatchAction } | { ok: false; reason: AIActionFailureReason } {
   const projectFinalNames = new Map<string, string>();
   const renamedIds = new Set<string>();
+  const updatedCategoryIds = new Set<string>();
+  const deletedCategoryIds = new Set<string>();
   const categoriesToRename: CategoryRenameDraft[] = [];
+  const categoriesToUpdate: CategoryUpdateDraft[] = [];
+  const categoriesToDelete: CategoryDeleteDraft[] = [];
 
   if (action.categoriesToRename) {
     for (const rename of action.categoriesToRename) {
@@ -779,7 +840,69 @@ function normalizeBatchAction(
     }
   }
 
+  if (action.categoriesToUpdate) {
+    for (const update of action.categoriesToUpdate) {
+      if (!update || typeof update.categoryId !== "string") return { ok: false, reason: "invalid_action" };
+      const categoryId = update.categoryId.trim();
+      if (!categoryId || categoryId === "uncategorized") return { ok: false, reason: "invalid_action" };
+      const project = state.projects.find((p) => p.id === categoryId);
+      if (!project) return { ok: false, reason: "missing_project" };
+      if (updatedCategoryIds.has(categoryId) || renamedIds.has(categoryId)) return { ok: false, reason: "invalid_action" };
+
+      const name = typeof update.name === "string" ? normalizeText(update.name, 80) : undefined;
+      const color = typeof update.color === "string" ? normalizeText(update.color, 80) : undefined;
+      const description = typeof update.description === "string" ? normalizeText(update.description, 240) ?? "" : undefined;
+      if ("name" in update && !name) return { ok: false, reason: "invalid_action" };
+      if (name && hasSecretLikeText([name])) return { ok: false, reason: "invalid_action" };
+      if (color && hasSecretLikeText([color])) return { ok: false, reason: "invalid_action" };
+      if (description && hasSecretLikeText([description])) return { ok: false, reason: "invalid_action" };
+      if (name) projectFinalNames.set(categoryId, name.toLowerCase());
+
+      const normalized: CategoryUpdateDraft = {
+        categoryId,
+        ...(name !== undefined && name !== project.name ? { name } : {}),
+        ...(color !== undefined && color !== project.color ? { color } : {}),
+        ...(description !== undefined && description !== project.description ? { description } : {}),
+      };
+      if (Object.keys(normalized).length === 1) return { ok: false, reason: "invalid_action" };
+      updatedCategoryIds.add(categoryId);
+      categoriesToUpdate.push(normalized);
+    }
+  }
+
+  if (action.categoriesToDelete) {
+    for (const deletion of action.categoriesToDelete) {
+      if (!deletion || typeof deletion.categoryId !== "string" || !deletion.strategy) return { ok: false, reason: "invalid_action" };
+      const categoryId = deletion.categoryId.trim();
+      if (!categoryId || categoryId === "uncategorized" || deletedCategoryIds.has(categoryId)) return { ok: false, reason: "invalid_action" };
+      if (updatedCategoryIds.has(categoryId) || renamedIds.has(categoryId)) return { ok: false, reason: "invalid_action" };
+      const project = state.projects.find((p) => p.id === categoryId);
+      if (!project) return { ok: false, reason: "missing_project" };
+
+      if (deletion.strategy.mode === "move_tasks_to_uncategorized") {
+        categoriesToDelete.push({ categoryId, strategy: { mode: "move_tasks_to_uncategorized" } });
+      } else if (deletion.strategy.mode === "move_tasks_to_category") {
+        const targetCategoryId = typeof deletion.strategy.targetCategoryId === "string" ? deletion.strategy.targetCategoryId.trim() : "";
+        if (!targetCategoryId || targetCategoryId === categoryId) return { ok: false, reason: "invalid_action" };
+        if (!state.projects.some((p) => p.id === targetCategoryId)) return { ok: false, reason: "missing_project" };
+        categoriesToDelete.push({ categoryId, strategy: { mode: "move_tasks_to_category", targetCategoryId } });
+      } else if (deletion.strategy.mode === "delete_tasks_too" && deletion.strategy.confirmTaskDeletion === true) {
+        categoriesToDelete.push({ categoryId, strategy: { mode: "delete_tasks_too", confirmTaskDeletion: true } });
+      } else {
+        return { ok: false, reason: "invalid_action" };
+      }
+      deletedCategoryIds.add(categoryId);
+    }
+  }
+
+  for (const deletion of categoriesToDelete) {
+    if (deletion.strategy.mode === "move_tasks_to_category" && deletedCategoryIds.has(deletion.strategy.targetCategoryId)) {
+      return { ok: false, reason: "invalid_action" };
+    }
+  }
+
   for (const p of state.projects) {
+    if (deletedCategoryIds.has(p.id)) continue;
     if (!projectFinalNames.has(p.id)) {
       projectFinalNames.set(p.id, p.name.trim().replace(/\s+/g, " ").toLowerCase());
     }
@@ -801,8 +924,10 @@ function normalizeBatchAction(
       }
       const ref = cat.ref.trim();
       const name = cat.name.trim().replace(/\s+/g, " ");
+      const color = typeof cat.color === "string" ? normalizeText(cat.color, 80) : undefined;
+      const description = typeof cat.description === "string" ? normalizeText(cat.description, 240) ?? "" : undefined;
       if (!ref || !name || name.length > 80) return { ok: false, reason: "invalid_action" };
-      if (hasSecretLikeText([name])) return { ok: false, reason: "invalid_action" };
+      if (hasSecretLikeText([name, color ?? "", description ?? ""])) return { ok: false, reason: "invalid_action" };
 
       if (newCategoryRefs.has(ref)) return { ok: false, reason: "invalid_action" };
       newCategoryRefs.add(ref);
@@ -813,7 +938,7 @@ function normalizeBatchAction(
 
       if (finalNamesSet.has(nameKey)) return { ok: false, reason: "invalid_action" };
 
-      categoriesToCreate.push({ ref, name });
+      categoriesToCreate.push({ ref, name, ...(color ? { color } : {}), ...(description ? { description } : {}) });
     }
   }
 
@@ -827,7 +952,7 @@ function normalizeBatchAction(
         if (draft.categoryTarget.kind === "existing") {
           const categoryId = draft.categoryTarget.categoryId;
           const exists = state.projects.some((p) => p.id === categoryId);
-          if (!exists) return { ok: false, reason: "invalid_action" };
+          if (!exists || deletedCategoryIds.has(categoryId)) return { ok: false, reason: "invalid_action" };
           normalized.categoryTarget = { kind: "existing", categoryId };
         } else if (draft.categoryTarget.kind === "new") {
           const ref = draft.categoryTarget.ref;
@@ -888,6 +1013,7 @@ function normalizeBatchAction(
       if (operation.operation === "update") {
         const changes = normalizeManageChanges(operation.changes, task, state.projects);
         if (!changes) return { ok: false, reason: "invalid_action" };
+        if (changes.projectId && deletedCategoryIds.has(changes.projectId)) return { ok: false, reason: "invalid_action" };
         manageOperations.push({ operation: "update", taskId: task.id, changes, reason: normalizeReason(operation.reason) });
         continue;
       }
@@ -899,6 +1025,8 @@ function normalizeBatchAction(
   if (
     categoriesToCreate.length === 0 &&
     categoriesToRename.length === 0 &&
+    categoriesToUpdate.length === 0 &&
+    categoriesToDelete.length === 0 &&
     tasksToCreate.length === 0 &&
     scheduleChanges.length === 0 &&
     manageOperations.length === 0
@@ -912,6 +1040,8 @@ function normalizeBatchAction(
       type: "batch_action",
       categoriesToCreate: categoriesToCreate.length ? categoriesToCreate : undefined,
       categoriesToRename: categoriesToRename.length ? categoriesToRename : undefined,
+      categoriesToUpdate: categoriesToUpdate.length ? categoriesToUpdate : undefined,
+      categoriesToDelete: categoriesToDelete.length ? categoriesToDelete : undefined,
       tasksToCreate: tasksToCreate.length ? tasksToCreate : undefined,
       scheduleChanges: scheduleChanges.length ? scheduleChanges : undefined,
       manageOperations: manageOperations.length ? manageOperations : undefined,
@@ -1016,6 +1146,13 @@ function normalizeTaskDraft(draft: AITaskDraft): AITaskDraft | undefined {
   const tags = Array.isArray(draft.tags)
     ? unique(draft.tags.map((tag) => normalizeText(tag, 40)).filter((tag): tag is string => Boolean(tag))).slice(0, 10)
     : [];
+  const subtasks = Array.isArray(draft.subtasks)
+    ? draft.subtasks
+        .map((subtask) => normalizeSubtaskDraft(subtask))
+        .filter((subtask): subtask is { title: string; completed: boolean } => Boolean(subtask))
+        .slice(0, 50)
+    : [];
+  if (Array.isArray(draft.subtasks) && subtasks.length !== draft.subtasks.length) return undefined;
 
   let categoryTarget: AICategoryTarget | undefined;
   if (draft.categoryTarget) {
@@ -1029,6 +1166,7 @@ function normalizeTaskDraft(draft: AITaskDraft): AITaskDraft | undefined {
   }
 
   if (hasSecretLikeText([title, description, projectName ?? "", ...tags])) return undefined;
+  if (hasSecretLikeText(subtasks.map((subtask) => subtask.title))) return undefined;
 
   return {
     title,
@@ -1040,6 +1178,7 @@ function normalizeTaskDraft(draft: AITaskDraft): AITaskDraft | undefined {
     projectName,
     categoryTarget,
     tags,
+    subtasks,
   };
 }
 
@@ -1084,7 +1223,51 @@ function normalizeManageChanges(changes: ManageTaskChanges, task: Task, projects
     if (project.id !== task.projectId) updates.projectId = project.id;
   }
 
+  if ("repeat" in changes) {
+    const repeat = normalizeRepeat(changes.repeat);
+    if (JSON.stringify(repeat) !== JSON.stringify(task.repeat)) updates.repeat = repeat;
+  }
+
+  if ("tags" in changes) {
+    if (!Array.isArray(changes.tags)) return undefined;
+    const tags = unique(changes.tags.map((tag) => normalizeText(tag, 40)).filter((tag): tag is string => Boolean(tag))).slice(0, 10);
+    if (tags.length !== changes.tags.length || hasSecretLikeText(tags)) return undefined;
+    if (JSON.stringify(tags) !== JSON.stringify(task.tags)) updates.tags = tags;
+  }
+
+  if ("subtasks" in changes) {
+    if (!Array.isArray(changes.subtasks)) return undefined;
+    const subtasks = changes.subtasks
+      .map((subtask) => normalizeSubtaskUpdate(subtask))
+      .filter((subtask): subtask is NonNullable<ReturnType<typeof normalizeSubtaskUpdate>> => Boolean(subtask))
+      .slice(0, 50);
+    if (subtasks.length !== changes.subtasks.length || hasSecretLikeText(subtasks.map((subtask) => subtask.title))) return undefined;
+    const nextSubtasks = subtasks.map((subtask) => ({
+      id: subtask.id ?? createSubtaskId(),
+      title: subtask.title,
+      completed: subtask.completed,
+    }));
+    if (JSON.stringify(nextSubtasks) !== JSON.stringify(task.subtasks)) updates.subtasks = nextSubtasks;
+  }
+
   return Object.keys(updates).length ? updates : undefined;
+}
+
+function normalizeSubtaskDraft(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const title = typeof record.title === "string" ? normalizeText(record.title, 180) : undefined;
+  if (!title) return undefined;
+  return { title, completed: record.completed === true };
+}
+
+function normalizeSubtaskUpdate(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const title = typeof record.title === "string" ? normalizeText(record.title, 180) : undefined;
+  if (!title) return undefined;
+  const id = typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 200) : undefined;
+  return { id, title, completed: record.completed === true };
 }
 
 function resolveProjectForDraft(
@@ -1131,7 +1314,11 @@ function createTaskFromDraft(
     repeat,
     nextRepeatAt: calculateNextRepeatAt({ scheduledAt, repeat }),
     tags: draft.tags ?? [],
-    subtasks: [],
+    subtasks: (draft.subtasks ?? []).map((subtask) => ({
+      id: createSubtaskId(),
+      title: subtask.title,
+      completed: subtask.completed === true,
+    })),
     createdAt: now,
     updatedAt: now,
   };
@@ -1206,6 +1393,20 @@ function createPreconditions(action: AssistantAction, state: AIActionStateSnapsh
     if (action.categoriesToRename) {
       action.categoriesToRename.forEach((rename) => {
         projectIds.add(rename.categoryId);
+      });
+    }
+    if (action.categoriesToUpdate) {
+      action.categoriesToUpdate.forEach((update) => {
+        projectIds.add(update.categoryId);
+      });
+    }
+    if (action.categoriesToDelete) {
+      action.categoriesToDelete.forEach((deletion) => {
+        projectIds.add(deletion.categoryId);
+        if (deletion.strategy.mode === "move_tasks_to_category") projectIds.add(deletion.strategy.targetCategoryId);
+        state.tasks.forEach((task) => {
+          if (task.projectId === deletion.categoryId) taskIds.add(task.id);
+        });
       });
     }
   }
@@ -1284,6 +1485,23 @@ function createPreviewItems(action: AssistantAction, state: AIActionStateSnapsho
         });
       });
     }
+    if (action.categoriesToUpdate) {
+      action.categoriesToUpdate.forEach((update) => {
+        const project = state.projects.find((p) => p.id === update.categoryId);
+        items.push({
+          kind: "update",
+          title: `Category: ${project?.name ?? update.categoryId}`,
+          before: project?.name,
+          after: update.name ?? project?.name,
+        });
+      });
+    }
+    if (action.categoriesToDelete) {
+      action.categoriesToDelete.forEach((deletion) => {
+        const project = state.projects.find((p) => p.id === deletion.categoryId);
+        items.push({ kind: "delete", title: `Category: ${project?.name ?? deletion.categoryId}`, destructive: true });
+      });
+    }
     if (action.tasksToCreate) {
       action.tasksToCreate.forEach((task) => {
         items.push({ kind: "create", title: task.title, after: task.scheduledAt ?? undefined });
@@ -1336,6 +1554,7 @@ function createTransactionSummary(
   const createdTaskCount = taskPatches.filter((patch) => patch.change === "created" && !patch.generatedByRecurringCompletion).length;
   const deletedTaskCount = taskPatches.filter((patch) => patch.change === "deleted").length;
   const updatedTaskCount = taskPatches.filter((patch) => patch.change === "updated").length;
+  const deletedProjectCount = projectPatches.filter((patch) => patch.change === "deleted").length;
   let completedTaskCount = 0;
   let reopenedTaskCount = 0;
 
@@ -1364,7 +1583,7 @@ function createTransactionSummary(
     deletedTaskCount,
     completedTaskCount,
     reopenedTaskCount,
-    destructive: deletedTaskCount > 0,
+    destructive: deletedTaskCount > 0 || deletedProjectCount > 0,
   };
 }
 
@@ -1432,6 +1651,13 @@ function buildUndoProjectPatches(originalPatches: AIActionProjectPatch[], workin
         before: patch.after ? cloneProject(patch.after) : undefined,
         after: patch.before ? cloneProject(patch.before) : undefined,
         change: "updated",
+      });
+    } else if (patch.change === "deleted") {
+      patches.push({
+        projectId: patch.projectId,
+        before: undefined,
+        after: patch.before ? cloneProject(patch.before) : undefined,
+        change: "created",
       });
     }
   }

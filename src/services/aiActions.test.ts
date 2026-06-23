@@ -341,6 +341,90 @@ describe("AI action protection foundation", () => {
     expect(undo.transaction.after.tasks.some((item) => item.title === "MCP task")).toBe(false);
   });
 
+  it("creates and updates advanced task fields through MCP actions", () => {
+    const state = baseState();
+    const created = mustTransaction(buildAIActionTransaction({
+      type: "create_tasks",
+      tasks: [{
+        title: "Drink water",
+        description: "Hydration habit",
+        scheduledAt: "2026-05-29T10:00",
+        durationMinutes: 5,
+        reminderMinutes: 10,
+        repeat: { ...defaultRepeat, enabled: true, type: "daily" },
+        tags: ["health"],
+        subtasks: [{ title: "Fill bottle" }],
+      }],
+    }, "mcp", state, { now, idFactory: idFactory() }));
+
+    const taskId = created.createdTaskIds[0];
+    const taskAfterCreate = created.after.tasks.find((item) => item.id === taskId);
+    expect(taskAfterCreate).toMatchObject({
+      title: "Drink water",
+      reminderMinutes: 10,
+      durationMinutes: 5,
+      repeat: expect.objectContaining({ enabled: true, type: "daily" }),
+      tags: ["health"],
+    });
+    expect(taskAfterCreate?.subtasks[0]).toMatchObject({ title: "Fill bottle", completed: false });
+    expect(taskAfterCreate?.subtasks[0].id).toBeTruthy();
+
+    const updated = mustTransaction(buildAIActionTransaction({
+      type: "manage_tasks",
+      operations: [{
+        operation: "update",
+        taskId,
+        changes: {
+          reminderMinutes: null,
+          repeat: { ...defaultRepeat, enabled: true, type: "weekly", unit: "week", weekdays: [1, 3, 5] },
+          tags: ["fitness", "routine"],
+          subtasks: [{ id: taskAfterCreate!.subtasks[0].id, title: "Fill bottle", completed: true }],
+        },
+      }],
+    }, "mcp", created.after, { now, idFactory: idFactory() }));
+
+    const taskAfterUpdate = updated.after.tasks.find((item) => item.id === taskId);
+    expect(taskAfterUpdate?.reminderMinutes).toBeNull();
+    expect(taskAfterUpdate?.repeat).toMatchObject({ enabled: true, type: "weekly", weekdays: [1, 3, 5] });
+    expect(taskAfterUpdate?.tags).toEqual(["fitness", "routine"]);
+    expect(taskAfterUpdate?.subtasks[0]).toMatchObject({ title: "Fill bottle", completed: true });
+  });
+
+  it("deletes categories with explicit strategies and supports undo", () => {
+    const state = baseState({
+      projects: [
+        project({ id: "uncategorized", name: "Uncategorized" }),
+        project({ id: "shopping", name: "Shopping" }),
+        project({ id: "home", name: "Home" }),
+      ],
+      tasks: [
+        task({ id: "buy", title: "Buy milk", projectId: "shopping" }),
+        task({ id: "clean", title: "Clean kitchen", projectId: "home" }),
+      ],
+    });
+
+    const movedToInbox = mustTransaction(buildAIActionTransaction({
+      type: "batch_action",
+      categoriesToDelete: [{ categoryId: "shopping", strategy: { mode: "move_tasks_to_uncategorized" } }],
+    }, "mcp", state, { now, idFactory: idFactory() }));
+    expect(movedToInbox.after.projects.some((item) => item.id === "shopping")).toBe(false);
+    expect(movedToInbox.after.tasks.find((item) => item.id === "buy")?.projectId).toBe("uncategorized");
+    expect(createAIActionAuditEntry(movedToInbox).summary.destructive).toBe(true);
+
+    const undo = createUndoAIActionTransaction(createAIActionAuditEntry(movedToInbox), movedToInbox.after, { now });
+    expect(undo.ok).toBe(true);
+    if (!undo.ok) return;
+    expect(undo.transaction.after.projects.some((item) => item.id === "shopping")).toBe(true);
+    expect(undo.transaction.after.tasks.find((item) => item.id === "buy")?.projectId).toBe("shopping");
+
+    const deleteTasksToo = mustTransaction(buildAIActionTransaction({
+      type: "batch_action",
+      categoriesToDelete: [{ categoryId: "home", strategy: { mode: "delete_tasks_too", confirmTaskDeletion: true } }],
+    }, "mcp", state, { now, idFactory: idFactory() }));
+    expect(deleteTasksToo.after.projects.some((item) => item.id === "home")).toBe(false);
+    expect(deleteTasksToo.after.tasks.some((item) => item.id === "clean")).toBe(false);
+  });
+
   it("audit records do not persist secrets or raw model content", () => {
     const applied = mustTransaction(buildAIActionTransaction({
       type: "create_tasks",

@@ -319,8 +319,11 @@ describe.sequential("Aevum local MCP service", () => {
     const fullToolDefinitions = (await fullClient.listTools()).tools;
     const fullTools = fullToolDefinitions.map((tool) => tool.name);
     expect(fullTools).toEqual(expect.arrayContaining([
-      "create_tasks", "update_task", "reschedule_task", "set_task_status", "delete_task",
-      "assign_task_to_category", "create_category", "rename_category", "start_full_agent_workflow",
+      "create_task", "create_tasks", "update_task", "reschedule_task", "set_task_status", "complete_task", "reopen_task",
+      "delete_task", "list_task_reminders", "set_task_reminder", "remove_task_reminder",
+      "list_categories", "assign_task_to_category", "create_category", "update_category", "rename_category", "delete_category",
+      "move_tasks_between_categories", "bulk_update_tasks", "bulk_reschedule_tasks", "bulk_complete_tasks", "bulk_delete_tasks",
+      "start_full_agent_workflow",
     ]));
     expect(fullTools.some((name) => /secret|token|setting|system|cache|model|telegram/i.test(name))).toBe(false);
     for (const tool of fullToolDefinitions) {
@@ -343,13 +346,25 @@ describe.sequential("Aevum local MCP service", () => {
     expect(harness.proposals).toHaveLength(1);
     expect(JSON.stringify(harness.snapshot)).toBe(before);
     const writeCalls = [
+      ["create_task", { task: { title: "One MCP task", scheduledAt: "2026-06-24T10:00", reminderMinutes: 10, repeat: { enabled: true, frequency: "daily", daysOfWeek: ["MO"] }, subtasks: [{ title: "Subtask" }] } }],
       ["update_task", { taskId: "task-1", changes: { title: "Updated" } }],
       ["reschedule_task", { taskId: "task-1", scheduledAt: "2026-06-23T09:00:00" }],
       ["set_task_status", { taskId: "task-1", status: "completed" }],
+      ["complete_task", { taskId: "task-1" }],
+      ["reopen_task", { taskId: "task-1" }],
       ["delete_task", { taskId: "task-1" }],
+      ["set_task_reminder", { taskId: "task-1", reminder: { relativeMinutesBefore: 30 } }],
+      ["remove_task_reminder", { taskId: "task-1" }],
       ["assign_task_to_category", { taskId: "task-1", categoryId: "uncategorized" }],
       ["create_category", { name: "Work" }],
+      ["update_category", { categoryId: "project-work", color: "blue", description: "Deep work" }],
       ["rename_category", { categoryId: "uncategorized", name: "Inbox renamed" }],
+      ["delete_category", { categoryId: "project-work", strategy: { mode: "move_tasks_to_uncategorized" } }],
+      ["move_tasks_between_categories", { taskIds: ["task-1"], targetCategoryId: "uncategorized" }],
+      ["bulk_update_tasks", { taskIds: ["task-1"], changes: { tags: ["mcp"] } }],
+      ["bulk_reschedule_tasks", { taskIds: ["task-1"], scheduledAt: "2026-06-24T10:00" }],
+      ["bulk_complete_tasks", { taskIds: ["task-1"] }],
+      ["bulk_delete_tasks", { taskIds: ["task-1"] }],
       ["propose_task_changes", { operations: [{ operation: "set_status", taskId: "task-1", status: "completed" }] }],
       ["start_full_agent_workflow", { instruction: "Prepare a safe plan" }],
     ] as const;
@@ -361,6 +376,10 @@ describe.sequential("Aevum local MCP service", () => {
         if (content.type === "text") expect(Array.isArray(JSON.parse(content.text)), name).toBe(false);
       }
     }
+    const reminders = await fullClient.callTool({ name: "list_task_reminders", arguments: { taskId: "task-1" } });
+    expect(reminders.structuredContent).toMatchObject({ status: "ok", count: 0 });
+    const exactReminder = await fullClient.callTool({ name: "set_task_reminder", arguments: { taskId: "task-1", reminder: { exactAt: "2026-06-24T18:00" } } });
+    expect(exactReminder.structuredContent).toMatchObject({ status: "unsupported" });
     expect(JSON.stringify(harness.snapshot)).toBe(before);
     expect(await harness.service.getStatus()).toMatchObject({
       toolAccess: {

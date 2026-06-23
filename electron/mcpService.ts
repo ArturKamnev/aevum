@@ -397,15 +397,59 @@ export class AevumMcpService {
       return { activity, count: activity.length };
     });
 
+    const reminderMinutesSchema = z.union([z.literal(0), z.literal(5), z.literal(10), z.literal(30), z.literal(60)]).nullable().optional();
+    const weekdayNameSchema = z.enum(["SU", "MO", "TU", "WE", "TH", "FR", "SA"]);
+    const repeatSchema = z.strictObject({
+      enabled: z.boolean(),
+      type: z.enum(["daily", "weekly", "monthly", "custom"]).optional(),
+      frequency: z.enum(["daily", "weekly", "monthly", "custom"]).optional(),
+      interval: z.number().int().min(1).max(365).optional(),
+      unit: z.enum(["day", "week", "month"]).optional(),
+      weekdays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+      daysOfWeek: z.array(weekdayNameSchema).max(7).optional(),
+      excludedWeekdays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+    }).optional();
+    const subtaskDraftSchema = z.strictObject({
+      title: z.string().trim().min(1).max(500),
+      completed: z.boolean().optional(),
+    });
+    const subtaskUpdateSchema = z.strictObject({
+      id: z.string().trim().min(1).max(200).optional(),
+      title: z.string().trim().min(1).max(500),
+      completed: z.boolean().optional(),
+    });
+    const taskDraftSchema = z.strictObject({
+      title: z.string().trim().min(1).max(500),
+      description: z.string().max(10_000).optional(),
+      scheduledAt: z.string().max(40).nullable().optional(),
+      durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
+      reminderMinutes: reminderMinutesSchema,
+      repeat: repeatSchema,
+      projectName: z.string().trim().min(1).max(200).optional(),
+      categoryId: z.string().trim().min(1).max(200).optional(),
+      tags: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
+      subtasks: z.array(subtaskDraftSchema).max(50).optional(),
+    });
+    const editableTaskFields = {
+      title: z.string().trim().min(1).max(500).optional(),
+      description: z.string().max(10_000).optional(),
+      scheduledAt: z.string().max(40).nullable().optional(),
+      durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
+      reminderMinutes: reminderMinutesSchema,
+      repeat: repeatSchema,
+      projectId: z.string().trim().min(1).max(200).optional(),
+      tags: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
+      subtasks: z.array(subtaskUpdateSchema).max(50).optional(),
+    };
+    const reminderSchema = z.strictObject({
+      enabled: z.boolean().optional(),
+      relativeMinutesBefore: reminderMinutesSchema,
+      exactAt: z.string().max(40).optional(),
+    });
+    const idempotencyKeySchema = z.string().trim().min(8).max(200).optional().describe("Stable unique key for safely retrying the same write request.");
+
     if (this.settings.accessMode !== "read-only" && scopes.includes("mcp:propose")) {
-      const changesSchema = z.object({
-        title: z.string().trim().min(1).max(500).optional(),
-        description: z.string().max(10_000).optional(),
-        scheduledAt: z.string().max(40).nullable().optional(),
-        durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
-        reminderMinutes: z.union([z.literal(0), z.literal(5), z.literal(10), z.literal(30), z.literal(60)]).nullable().optional(),
-        projectId: z.string().max(200).optional(),
-      });
+      const changesSchema = z.object(editableTaskFields);
       const operationSchema = z.discriminatedUnion("operation", [
         z.object({ operation: z.literal("update"), taskId: z.string().min(1).max(200), changes: changesSchema, reason: z.string().max(1000).optional() }),
         z.object({ operation: z.literal("set_status"), taskId: z.string().min(1).max(200), status: z.enum(["active", "completed"]), reason: z.string().max(1000).optional() }),
@@ -420,64 +464,138 @@ export class AevumMcpService {
     }
 
     if (this.settings.accessMode === "full-access" && scopes.includes("mcp:write")) {
-      const reminderSchema = z.union([z.literal(0), z.literal(5), z.literal(10), z.literal(30), z.literal(60)]).nullable().optional();
-      const taskDraftSchema = z.strictObject({
-        title: z.string().trim().min(1).max(500),
-        description: z.string().max(10_000).optional(),
-        scheduledAt: z.string().max(40).nullable().optional(),
-        durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
-        reminderMinutes: reminderSchema,
-        projectName: z.string().trim().min(1).max(200).optional(),
-        tags: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
-      });
-      const editableTaskFields = {
-        title: z.string().trim().min(1).max(500).optional(),
-        description: z.string().max(10_000).optional(),
-        scheduledAt: z.string().max(40).nullable().optional(),
-        durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
-        reminderMinutes: reminderSchema,
-      };
-      const idempotencyKeySchema = z.string().trim().min(8).max(200).optional().describe("Stable unique key for safely retrying the same write request.");
       const submitAction = (action: unknown, idempotencyKey?: string) => this.submitReplaySafeAction(action, idempotencyKey).then(proposalResponse);
+      const submitTaskUpdate = (taskId: string, changes: Record<string, unknown>, idempotencyKey?: string) =>
+        submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes: normalizeMcpTaskChanges(changes) }] }, idempotencyKey);
 
-      registerJsonTool(server, "create_tasks", "Create one or more tasks after confirmation in Aevum.", {
+      registerJsonTool(server, "create_task", "Create one task with date/time, category, recurrence, reminder offset, tags, and subtasks. The write is sent to Aevum for confirmation.", {
+        task: taskDraftSchema,
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ task, idempotencyKey }) => submitAction({ type: "create_tasks", tasks: [normalizeMcpTaskDraft(task)] }, idempotencyKey));
+      registerJsonTool(server, "create_tasks", "Create one or more tasks. Each task supports the same fields as create_task.", {
         tasks: z.array(taskDraftSchema).min(1).max(100),
         idempotencyKey: idempotencyKeySchema,
-      }, async ({ tasks, idempotencyKey }) => submitAction({ type: "create_tasks", tasks }, idempotencyKey));
-      registerJsonTool(server, "update_task", "Edit a task after confirmation in Aevum.", {
+      }, async ({ tasks, idempotencyKey }) => submitAction({ type: "create_tasks", tasks: tasks.map(normalizeMcpTaskDraft) }, idempotencyKey));
+      registerJsonTool(server, "update_task", "Partially edit any safe task field after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         changes: z.strictObject(editableTaskFields).refine((changes) => Object.keys(changes).length > 0),
         idempotencyKey: idempotencyKeySchema,
-      }, async ({ taskId, changes, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes }] }, idempotencyKey));
+      }, async ({ taskId, changes, idempotencyKey }) => submitTaskUpdate(taskId, changes, idempotencyKey));
       registerJsonTool(server, "reschedule_task", "Move or reschedule a task after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         scheduledAt: z.string().max(40).nullable(),
         durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
         idempotencyKey: idempotencyKeySchema,
-      }, async ({ taskId, scheduledAt, durationMinutes, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes: { scheduledAt, ...(durationMinutes === undefined ? {} : { durationMinutes }) } }] }, idempotencyKey));
+      }, async ({ taskId, scheduledAt, durationMinutes, idempotencyKey }) => submitTaskUpdate(taskId, { scheduledAt, ...(durationMinutes === undefined ? {} : { durationMinutes }) }, idempotencyKey));
       registerJsonTool(server, "set_task_status", "Complete or reopen a task after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         status: z.enum(["active", "completed"]),
         idempotencyKey: idempotencyKeySchema,
       }, async ({ taskId, status, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "set_status", taskId, status }] }, idempotencyKey));
-      registerJsonTool(server, "delete_task", "Delete a task after confirmation in Aevum.", {
+      registerJsonTool(server, "complete_task", "Mark one exact task ID complete. Completing a recurring task uses Aevum's existing next-occurrence logic.", {
         taskId: z.string().trim().min(1).max(200),
         idempotencyKey: idempotencyKeySchema,
-      }, async ({ taskId, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "delete", taskId }] }, idempotencyKey));
+      }, async ({ taskId, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "set_status", taskId, status: "completed" }] }, idempotencyKey));
+      registerJsonTool(server, "reopen_task", "Reopen one exact completed task ID.", {
+        taskId: z.string().trim().min(1).max(200),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "set_status", taskId, status: "active" }] }, idempotencyKey));
+      registerJsonTool(server, "delete_task", "Delete a task after confirmation in Aevum.", {
+        taskId: z.string().trim().min(1).max(200),
+        recurrenceScope: z.enum(["this_occurrence", "future_occurrences", "entire_series"]).optional(),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, recurrenceScope = "this_occurrence", idempotencyKey }) => {
+        const operations = recurrenceScope === "this_occurrence"
+          ? [{ operation: "delete", taskId }]
+          : buildRecurringDeleteOperations((await this.snapshot()).tasks, taskId, recurrenceScope);
+        if (!operations.length) return { status: "unsupported", message: "No recurring occurrences could be identified for that task id." };
+        if (operations.length > 100) return { status: "unsupported", message: "Recurring delete is limited to 100 visible occurrences per request.", count: operations.length };
+        return submitAction({ type: "manage_tasks", operations }, idempotencyKey);
+      });
+      registerJsonTool(server, "list_task_reminders", "Return the reminder state for one exact task ID.", {
+        taskId: z.string().trim().min(1).max(200),
+      }, async ({ taskId }) => {
+        const task = (await this.snapshot()).tasks.find((item) => item.id === taskId);
+        if (!task) return { status: "not_found", taskId, reminders: [], count: 0 };
+        const reminders = task.reminderMinutes === null ? [] : [{ type: "relative", relativeMinutesBefore: task.reminderMinutes, enabled: true }];
+        return { status: "ok", taskId, reminders, count: reminders.length, limitation: "Aevum currently stores one relative reminder offset per task." };
+      });
+      registerJsonTool(server, "set_task_reminder", "Add or edit a task reminder. Aevum currently supports one relative reminder offset: 0, 5, 10, 30, or 60 minutes before the scheduled time.", {
+        taskId: z.string().trim().min(1).max(200),
+        reminder: reminderSchema,
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, reminder, idempotencyKey }) => {
+        const parsed = normalizeMcpReminder(reminder);
+        if (!parsed.ok) return parsed.result;
+        return submitTaskUpdate(taskId, { reminderMinutes: parsed.reminderMinutes }, idempotencyKey);
+      });
+      registerJsonTool(server, "remove_task_reminder", "Remove the reminder from one exact task ID.", {
+        taskId: z.string().trim().min(1).max(200),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskId, idempotencyKey }) => submitTaskUpdate(taskId, { reminderMinutes: null }, idempotencyKey));
+      registerJsonTool(server, "list_categories", "List sanitized categories with ids, names, colors, and descriptions.", {}, async () => {
+        const categories = (await this.snapshot()).categories;
+        return { categories, count: categories.length };
+      });
       registerJsonTool(server, "assign_task_to_category", "Assign a task to a category after confirmation in Aevum.", {
         taskId: z.string().trim().min(1).max(200),
         categoryId: z.string().trim().min(1).max(200),
         idempotencyKey: idempotencyKeySchema,
-      }, async ({ taskId, categoryId, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: [{ operation: "update", taskId, changes: { projectId: categoryId } }] }, idempotencyKey));
+      }, async ({ taskId, categoryId, idempotencyKey }) => submitTaskUpdate(taskId, { projectId: categoryId }, idempotencyKey));
       registerJsonTool(server, "create_category", "Create a task category after confirmation in Aevum.", {
         name: z.string().trim().min(1).max(200),
+        color: z.string().trim().min(1).max(80).optional(),
+        description: z.string().max(1000).optional(),
         idempotencyKey: idempotencyKeySchema,
-      }, async ({ name, idempotencyKey }) => submitAction({ type: "batch_action", categoriesToCreate: [{ ref: "mcp-category", name }] }, idempotencyKey));
+      }, async ({ name, color, description, idempotencyKey }) => submitAction({
+        type: "batch_action",
+        categoriesToCreate: [{ ref: "mcp-category", name, ...(color ? { color } : {}), ...(description ? { description } : {}) }],
+      }, idempotencyKey));
+      registerJsonTool(server, "update_category", "Rename or edit category color/description after confirmation in Aevum.", {
+        categoryId: z.string().trim().min(1).max(200),
+        name: z.string().trim().min(1).max(200).optional(),
+        color: z.string().trim().min(1).max(80).optional(),
+        description: z.string().max(1000).optional(),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ categoryId, name, color, description, idempotencyKey }) => submitAction({ type: "batch_action", categoriesToUpdate: [{ categoryId, ...(name ? { name } : {}), ...(color ? { color } : {}), ...(description === undefined ? {} : { description }) }] }, idempotencyKey));
       registerJsonTool(server, "rename_category", "Rename a task category after confirmation in Aevum.", {
         categoryId: z.string().trim().min(1).max(200),
         name: z.string().trim().min(1).max(200),
         idempotencyKey: idempotencyKeySchema,
       }, async ({ categoryId, name, idempotencyKey }) => submitAction({ type: "batch_action", categoriesToRename: [{ categoryId, newName: name }] }, idempotencyKey));
+      registerJsonTool(server, "delete_category", "Delete a category by exact id using an explicit task handling strategy. Deleting tasks too is always confirmation/proposal based.", {
+        categoryId: z.string().trim().min(1).max(200),
+        strategy: z.discriminatedUnion("mode", [
+          z.strictObject({ mode: z.literal("move_tasks_to_uncategorized") }),
+          z.strictObject({ mode: z.literal("move_tasks_to_category"), targetCategoryId: z.string().trim().min(1).max(200) }),
+          z.strictObject({ mode: z.literal("delete_tasks_too"), confirmTaskDeletion: z.literal(true) }),
+        ]),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ categoryId, strategy, idempotencyKey }) => submitAction({ type: "batch_action", categoriesToDelete: [{ categoryId, strategy }] }, idempotencyKey));
+      registerJsonTool(server, "move_tasks_between_categories", "Move explicit task IDs from one category to another after confirmation in Aevum.", {
+        taskIds: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
+        targetCategoryId: z.string().trim().min(1).max(200),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskIds, targetCategoryId, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: uniqueStrings(taskIds).map((taskId) => ({ operation: "update", taskId, changes: { projectId: targetCategoryId } })) }, idempotencyKey));
+      registerJsonTool(server, "bulk_update_tasks", "Update explicit task IDs with the same safe partial changes. Requires exact task ids.", {
+        taskIds: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
+        changes: z.strictObject(editableTaskFields).refine((changes) => Object.keys(changes).length > 0),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskIds, changes, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: uniqueStrings(taskIds).map((taskId) => ({ operation: "update", taskId, changes: normalizeMcpTaskChanges(changes) })) }, idempotencyKey));
+      registerJsonTool(server, "bulk_reschedule_tasks", "Reschedule explicit task IDs to the same date/time or date-only value.", {
+        taskIds: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
+        scheduledAt: z.string().max(40).nullable(),
+        durationMinutes: z.number().int().min(1).max(1440).nullable().optional(),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskIds, scheduledAt, durationMinutes, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: uniqueStrings(taskIds).map((taskId) => ({ operation: "update", taskId, changes: { scheduledAt, ...(durationMinutes === undefined ? {} : { durationMinutes }) } })) }, idempotencyKey));
+      registerJsonTool(server, "bulk_complete_tasks", "Complete explicit task IDs after confirmation in Aevum.", {
+        taskIds: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskIds, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: uniqueStrings(taskIds).map((taskId) => ({ operation: "set_status", taskId, status: "completed" })) }, idempotencyKey));
+      registerJsonTool(server, "bulk_delete_tasks", "Delete explicit task IDs only. Vague destructive matching is intentionally unsupported.", {
+        taskIds: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
+        idempotencyKey: idempotencyKeySchema,
+      }, async ({ taskIds, idempotencyKey }) => submitAction({ type: "manage_tasks", operations: uniqueStrings(taskIds).map((taskId) => ({ operation: "delete", taskId })) }, idempotencyKey));
     }
     return server;
   }
@@ -549,6 +667,82 @@ function proposalResponse(result: { ok: boolean; proposalId?: string; message?: 
   return { proposalId: result.proposalId ?? "", status: "awaiting_confirmation", message: "Proposal sent to Aevum for user confirmation. No changes have been applied." };
 }
 
+function normalizeMcpTaskDraft(task: Record<string, unknown>) {
+  const { categoryId, repeat, ...rest } = task;
+  return {
+    ...rest,
+    ...(typeof categoryId === "string" && categoryId.trim() ? { categoryTarget: { kind: "existing", categoryId: categoryId.trim() } } : {}),
+    ...(repeat ? { repeat: normalizeMcpRepeat(repeat) } : {}),
+  };
+}
+
+function normalizeMcpTaskChanges(changes: Record<string, unknown>) {
+  return {
+    ...changes,
+    ...(changes.repeat ? { repeat: normalizeMcpRepeat(changes.repeat) } : {}),
+  };
+}
+
+function normalizeMcpRepeat(value: unknown) {
+  if (!isRecord(value)) return value;
+  const frequency = value.frequency === "daily" || value.frequency === "weekly" || value.frequency === "monthly" || value.frequency === "custom"
+    ? value.frequency
+    : undefined;
+  return {
+    enabled: value.enabled === true,
+    type: value.type ?? frequency ?? "daily",
+    interval: value.interval,
+    unit: value.unit,
+    weekdays: Array.isArray(value.weekdays) ? value.weekdays : weekdayNamesToNumbers(value.daysOfWeek),
+    excludedWeekdays: value.excludedWeekdays,
+  };
+}
+
+function normalizeMcpReminder(value: Record<string, unknown>): { ok: true; reminderMinutes: number | null } | { ok: false; result: Record<string, unknown> } {
+  if (typeof value.exactAt === "string" && value.exactAt.trim()) {
+    return {
+      ok: false,
+      result: {
+        status: "unsupported",
+        message: "Aevum currently supports one relative reminder offset per task, not a separate exact reminder datetime.",
+        limitation: "Set scheduledAt to the desired time and use relativeMinutesBefore 0, 5, 10, 30, or 60.",
+      },
+    };
+  }
+  if (value.enabled === false || value.relativeMinutesBefore === null) return { ok: true, reminderMinutes: null };
+  if (value.relativeMinutesBefore === 0 || value.relativeMinutesBefore === 5 || value.relativeMinutesBefore === 10 || value.relativeMinutesBefore === 30 || value.relativeMinutesBefore === 60) {
+    return { ok: true, reminderMinutes: value.relativeMinutesBefore };
+  }
+  return {
+    ok: false,
+    result: {
+      status: "invalid",
+      message: "Reminder offset must be 0, 5, 10, 30, or 60 minutes.",
+    },
+  };
+}
+
+function buildRecurringDeleteOperations(tasks: SafeTask[], taskId: string, scope: "future_occurrences" | "entire_series") {
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) return [];
+  const rootId = task.recurringParentId ?? task.id;
+  const series = tasks.filter((item) => (item.recurringParentId ?? item.id) === rootId);
+  const selectedAt = task.scheduledAt;
+  return series
+    .filter((item) => scope === "entire_series" || (selectedAt ? (item.scheduledAt ?? "") >= selectedAt : item.id === taskId))
+    .map((item) => ({ operation: "delete", taskId: item.id }));
+}
+
+function weekdayNamesToNumbers(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const dayMap: Record<string, number> = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+  return [...new Set(value.map((day) => typeof day === "string" ? dayMap[day] : undefined).filter((day): day is number => typeof day === "number"))];
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
+}
+
 function taskCollection(tasks: SafeTask[], limit = 20, offset = 0, categories: SafeSnapshot["categories"] = []) {
   const page = tasks.slice(offset, offset + limit).map((task) => compactTask(task, categories));
   return { tasks: page, count: page.length, total: tasks.length, offset, limit, hasMore: offset + page.length < tasks.length };
@@ -560,8 +754,21 @@ function compactTask(task: SafeTask, categories: SafeSnapshot["categories"]) {
     id: task.id,
     title: task.title,
     scheduledAt: task.scheduledAt,
+    durationMinutes: task.durationMinutes,
     status: task.status,
     category: category ? { id: category.id, name: category.name } : { id: task.projectId },
+    recurrence: task.repeat.enabled ? {
+      enabled: true,
+      type: task.repeat.type,
+      interval: task.repeat.interval,
+      unit: task.repeat.unit,
+      weekdays: task.repeat.weekdays,
+      excludedWeekdays: task.repeat.excludedWeekdays,
+      nextRepeatAt: task.nextRepeatAt,
+    } : { enabled: false },
+    reminder: task.reminderMinutes === null ? { enabled: false } : { enabled: true, relativeMinutesBefore: task.reminderMinutes },
+    tags: task.tags,
+    subtasks: task.subtasks,
     description: task.description.length > 280 ? `${task.description.slice(0, 277)}...` : task.description,
   };
 }
@@ -569,6 +776,8 @@ function compactTask(task: SafeTask, categories: SafeSnapshot["categories"]) {
 type SafeTask = {
   id: string; title: string; description: string; status: "active" | "completed"; scheduledAt: string | null;
   projectId: string; durationMinutes: number | null; reminderMinutes: number | null; tags: string[];
+  repeat: { enabled: boolean; type: "daily" | "weekly" | "monthly" | "custom"; interval: number; unit: "day" | "week" | "month"; weekdays: number[]; excludedWeekdays: number[] };
+  nextRepeatAt: string | null; recurringParentId?: string;
   subtasks: Array<{ id: string; title: string; completed: boolean }>;
 };
 type SafeSnapshot = {
@@ -604,8 +813,30 @@ function sanitizeTask(value: unknown): SafeTask | undefined {
     durationMinutes: typeof value.durationMinutes === "number" ? value.durationMinutes : null,
     reminderMinutes: typeof value.reminderMinutes === "number" ? value.reminderMinutes : null,
     tags: Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string").slice(0, 100) : [],
+    repeat: sanitizeRepeat(value.repeat),
+    nextRepeatAt: typeof value.nextRepeatAt === "string" ? value.nextRepeatAt : null,
+    recurringParentId: typeof value.recurringParentId === "string" ? value.recurringParentId : undefined,
     subtasks: Array.isArray(value.subtasks) ? value.subtasks.map((subtask) => isRecord(subtask) && typeof subtask.id === "string" && typeof subtask.title === "string" ? { id: subtask.id, title: subtask.title, completed: subtask.completed === true } : undefined).filter((subtask): subtask is SafeTask["subtasks"][number] => Boolean(subtask)) : [],
   };
+}
+
+function sanitizeRepeat(value: unknown): SafeTask["repeat"] {
+  if (!isRecord(value)) return { enabled: false, type: "daily", interval: 1, unit: "day", weekdays: [], excludedWeekdays: [] };
+  const type = value.type === "weekly" || value.type === "monthly" || value.type === "custom" ? value.type : "daily";
+  const unit = value.unit === "week" || value.unit === "month" ? value.unit : "day";
+  return {
+    enabled: value.enabled === true,
+    type,
+    interval: typeof value.interval === "number" && Number.isFinite(value.interval) && value.interval > 0 ? Math.floor(value.interval) : 1,
+    unit,
+    weekdays: readWeekdayNumbers(value.weekdays),
+    excludedWeekdays: readWeekdayNumbers(value.excludedWeekdays),
+  };
+}
+
+function readWeekdayNumbers(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6))];
 }
 
 function sanitizeCategory(value: unknown) {
