@@ -29,8 +29,12 @@ export async function migrateDatabase(database: RelayDatabase) {
       client_id TEXT PRIMARY KEY,
       client_name TEXT NOT NULL,
       redirect_uris JSONB NOT NULL,
+      token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+      client_secret_hash TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none';
+    ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS client_secret_hash TEXT;
     CREATE TABLE IF NOT EXISTS oauth_sessions (
       session_id TEXT PRIMARY KEY,
       device_public_id TEXT NOT NULL REFERENCES relay_devices(device_public_id) ON DELETE CASCADE,

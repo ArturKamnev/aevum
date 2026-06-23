@@ -17,6 +17,19 @@ const maxHttpBodyBytes = 512 * 1024;
 
 type PendingRequest = { devicePublicId: string; timer: NodeJS.Timeout; resolve: (value: unknown) => void; reject: (error: Error) => void };
 type DeviceConnection = { socket: WebSocket; devicePublicId: string; accessMode: AccessMode; alive: boolean };
+type OAuthClientRow = { client_id: string; client_name: string; redirect_uris: string[]; token_endpoint_auth_method?: string; client_secret_hash?: string | null };
+type OAuthRequestDiagnostics = {
+  userAgent?: string;
+  clientIdPresent?: boolean;
+  redirectUri?: { host: string; path: string };
+  responseType?: string;
+  requestedScopes?: string[];
+  codeChallengePresent?: boolean;
+  codeChallengeMethod?: string;
+  statePresent?: boolean;
+  resource?: string;
+  validationFailureReason?: string;
+};
 
 export function createRelayServer(config: RelayConfig, database: RelayDatabase) {
   const hub = new DeviceHub(config, database);
@@ -70,7 +83,10 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse, 
   }
   if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") return authorizationMetadata(response, context.config);
   if (request.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") return sendJson(response, 200, {
-    authorization_servers: [context.config.publicOrigin], resource_name: "Aevum Connect Relay",
+    resource: `${context.config.publicOrigin}/mcp`,
+    authorization_servers: [context.config.publicOrigin],
+    scopes_supported: ["mcp:read", "mcp:propose", "mcp:write"],
+    resource_name: "Aevum Connect Relay",
   });
   const protectedMatch = url.pathname.match(/^\/\.well-known\/oauth-protected-resource\/mcp\/([A-Za-z0-9_-]{24,128})$/);
   if (request.method === "GET" && protectedMatch) return protectedResourceMetadata(response, context, protectedMatch[1]);
@@ -150,7 +166,7 @@ function authorizationMetadata(response: ServerResponse, config: RelayConfig) {
     registration_endpoint: `${config.publicOrigin}/register`,
     revocation_endpoint: `${config.publicOrigin}/revoke`,
     response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
-    code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"],
+    code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
     scopes_supported: ["mcp:read", "mcp:propose", "mcp:write"],
   });
 }
@@ -167,50 +183,101 @@ async function protectedResourceMetadata(response: ServerResponse, context: Rout
 }
 
 async function registerClient(request: IncomingMessage, response: ServerResponse, context: RouteContext) {
-  const body = await readJson(request);
-  if (!isRecord(body) || !Array.isArray(body.redirect_uris) || !body.redirect_uris.every(isSafeRedirectUri)) {
-    return sendOAuthError(response, 400, "invalid_client_metadata", "Valid HTTPS redirect_uris are required.");
+  let body: unknown;
+  try { body = await readJson(request); }
+  catch {
+    logOAuthRequest("warn", "oauth_register_rejected", request, { validationFailureReason: "invalid_json" });
+    return sendOAuthError(response, 400, "invalid_client_metadata", "Registration metadata must be valid JSON.");
+  }
+  const redirectUris = isRecord(body) && Array.isArray(body.redirect_uris) ? body.redirect_uris.filter((value): value is string => typeof value === "string") : [];
+  const validRedirectUris = redirectUris.filter((value) => isSafeRedirectUri(value, context.config));
+  const tokenAuthMethod = normalizeTokenEndpointAuthMethod(isRecord(body) ? body.token_endpoint_auth_method : undefined);
+  const requestedGrantTypes = isRecord(body) && Array.isArray(body.grant_types) ? body.grant_types.filter((value): value is string => typeof value === "string") : [];
+  const requestedResponseTypes = isRecord(body) && Array.isArray(body.response_types) ? body.response_types.filter((value): value is string => typeof value === "string") : [];
+  const invalidGrantTypes = requestedGrantTypes.filter((value) => !["authorization_code", "refresh_token"].includes(value));
+  const invalidResponseTypes = requestedResponseTypes.filter((value) => value !== "code");
+  const registrationDiagnostics: OAuthRequestDiagnostics = {
+    clientIdPresent: false,
+    redirectUri: validRedirectUris[0] ? safeRedirectUriParts(validRedirectUris[0]) : undefined,
+    requestedScopes: parseScope(isRecord(body) && typeof body.scope === "string" ? body.scope : undefined),
+    validationFailureReason: undefined,
+  };
+  if (!isRecord(body)) {
+    logOAuthRequest("warn", "oauth_register_rejected", request, { ...registrationDiagnostics, validationFailureReason: "invalid_metadata" });
+    return sendOAuthError(response, 400, "invalid_client_metadata", "Registration metadata must be a JSON object.");
+  }
+  if (!validRedirectUris.length || validRedirectUris.length !== redirectUris.length) {
+    logOAuthRequest("warn", "oauth_register_rejected", request, { ...registrationDiagnostics, validationFailureReason: "invalid_redirect_uris" });
+    return sendOAuthError(response, 400, "invalid_client_metadata", "At least one valid HTTPS redirect_uri is required. Loopback localhost redirects are allowed for native development clients.");
+  }
+  if (!tokenAuthMethod) {
+    logOAuthRequest("warn", "oauth_register_rejected", request, { ...registrationDiagnostics, validationFailureReason: "unsupported_token_endpoint_auth_method" });
+    return sendOAuthError(response, 400, "invalid_client_metadata", "Unsupported token_endpoint_auth_method.");
+  }
+  if (invalidGrantTypes.length || invalidResponseTypes.length) {
+    logOAuthRequest("warn", "oauth_register_rejected", request, { ...registrationDiagnostics, validationFailureReason: "unsupported_oauth_flow" });
+    return sendOAuthError(response, 400, "invalid_client_metadata", "Only authorization code and refresh token grants with code response type are supported.");
   }
   const clientId = randomToken(24);
+  const clientSecret = tokenAuthMethod === "none" ? undefined : randomToken(32);
   const clientName = typeof body.client_name === "string" ? body.client_name.slice(0, 300) : "MCP client";
-  await context.database.query("INSERT INTO oauth_clients(client_id,client_name,redirect_uris) VALUES($1,$2,$3::jsonb)", [clientId, clientName, JSON.stringify(body.redirect_uris)]);
-  log("info", "oauth_client_registered", { clientIdSuffix: clientId.slice(-6) });
+  await context.database.query(
+    "INSERT INTO oauth_clients(client_id,client_name,redirect_uris,token_endpoint_auth_method,client_secret_hash) VALUES($1,$2,$3::jsonb,$4,$5)",
+    [clientId, clientName, JSON.stringify(validRedirectUris), tokenAuthMethod, clientSecret ? hashSecret(clientSecret, context.config.tokenSecret) : null],
+  );
+  logOAuthRequest("info", "oauth_client_registered", request, { ...registrationDiagnostics, validationFailureReason: undefined });
+  log("info", "oauth_client_registered_record", { clientIdSuffix: clientId.slice(-6), tokenEndpointAuthMethod: tokenAuthMethod });
   sendJson(response, 201, {
     client_id: clientId, client_id_issued_at: Math.floor(Date.now() / 1000), client_name: clientName,
-    redirect_uris: body.redirect_uris, token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
+    ...(clientSecret ? { client_secret: clientSecret } : {}),
+    redirect_uris: validRedirectUris, token_endpoint_auth_method: tokenAuthMethod, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
   });
 }
 
-async function authorize(_request: IncomingMessage, response: ServerResponse, context: RouteContext, url: URL) {
+async function authorize(request: IncomingMessage, response: ServerResponse, context: RouteContext, url: URL) {
   const clientId = url.searchParams.get("client_id") ?? "";
   const redirectUri = url.searchParams.get("redirect_uri") ?? "";
   const resource = url.searchParams.get("resource") ?? "";
   const codeChallenge = url.searchParams.get("code_challenge") ?? "";
   const state = url.searchParams.get("state");
-  let devicePublicId = "";
-  try {
-    const resourceUrl = new URL(resource);
-    if (resourceUrl.origin === context.config.publicOrigin && !resourceUrl.search && !resourceUrl.hash) {
-      devicePublicId = resourceUrl.pathname.match(/^\/mcp\/([A-Za-z0-9_-]{24,128})$/)?.[1] ?? "";
-    }
-  } catch {}
-  const [clientResult, device] = await Promise.all([
-    context.database.query("SELECT * FROM oauth_clients WHERE client_id=$1", [clientId]),
-    getActiveDevice(context.database, devicePublicId),
-  ]);
-  const client = clientResult.rows[0];
-  if (!client || !(client.redirect_uris as string[]).includes(redirectUri) || !device || url.searchParams.get("response_type") !== "code" || url.searchParams.get("code_challenge_method") !== "S256" || codeChallenge.length < 43) {
-    return sendOAuthError(response, 400, "invalid_request", "The authorization request is invalid.");
+  const baseDiagnostics = authorizeDiagnostics(url);
+  const client = (await context.database.query("SELECT * FROM oauth_clients WHERE client_id=$1", [clientId])).rows[0] as OAuthClientRow | undefined;
+  if (url.searchParams.get("response_type") !== "code") {
+    return rejectAuthorize(request, response, context, undefined, redirectUri, state, "unsupported_response_type", "response_type must be code.", "invalid_request", baseDiagnostics);
+  }
+  if (!client) {
+    return rejectAuthorize(request, response, context, undefined, redirectUri, state, "unknown_client", "The OAuth client is not registered.", "invalid_client", baseDiagnostics);
+  }
+  if (!(client.redirect_uris as string[]).includes(redirectUri)) {
+    return rejectAuthorize(request, response, context, undefined, redirectUri, state, "redirect_uri_mismatch", "The redirect_uri does not match the registered client.", "invalid_request", baseDiagnostics);
+  }
+  const resourceResult = await resolveAuthorizeResource(context.database, context.config.publicOrigin, resource);
+  if (!resourceResult.ok) {
+    return rejectAuthorize(request, response, context, undefined, redirectUri, state, resourceResult.reason, "A valid Aevum MCP resource is required.", resourceResult.reason === "unknown_device" ? "invalid_target" : "invalid_request", baseDiagnostics);
+  }
+  const devicePublicId = resourceResult.devicePublicId;
+  const device = await getActiveDevice(context.database, devicePublicId);
+  if (!device) {
+    return rejectAuthorize(request, response, context, devicePublicId, redirectUri, state, "unknown_device", "The Aevum device is not available.", "invalid_target", baseDiagnostics);
+  }
+  if (url.searchParams.get("code_challenge_method") !== "S256") {
+    return rejectAuthorize(request, response, context, devicePublicId, redirectUri, state, "pkce_method_missing_or_unsupported", "A S256 PKCE code_challenge is required.", "invalid_request", baseDiagnostics);
+  }
+  if (codeChallenge.length < 43) {
+    return rejectAuthorize(request, response, context, devicePublicId, redirectUri, state, "pkce_challenge_missing_or_short", "A S256 PKCE code_challenge is required.", "invalid_request", baseDiagnostics);
   }
   const allowed = scopesForMode(device.access_mode);
-  const requested = (url.searchParams.get("scope")?.split(/\s+/).filter(Boolean) ?? allowed);
-  if (!requested.includes("mcp:read") || requested.some((scope) => !allowed.includes(scope))) {
-    log("warn", "oauth_authorize_rejected", { reason: "invalid_scope", deviceIdSuffix: devicePublicId.slice(-6), clientIdSuffix: clientId.slice(-6) });
-    return redirectOAuthError(response, redirectUri, state, "invalid_scope");
+  const requestedScopes = parseScope(url.searchParams.get("scope"));
+  const requested = requestedScopes.length ? requestedScopes.filter((scope) => allowed.includes(scope)) : allowed;
+  const unknownScopes = requestedScopes.filter((scope) => !["mcp:read", "mcp:propose", "mcp:write"].includes(scope));
+  const disallowedScopes = requestedScopes.filter((scope) => ["mcp:read", "mcp:propose", "mcp:write"].includes(scope) && !allowed.includes(scope));
+  if (!requested.includes("mcp:read") || unknownScopes.length || disallowedScopes.length) {
+    return rejectAuthorize(request, response, context, devicePublicId, redirectUri, state, unknownScopes.length ? "unknown_scope" : "scope_not_allowed", "The requested OAuth scope is not available for this Aevum access mode.", "invalid_scope", baseDiagnostics);
   }
 
   const grant = (await context.database.query("SELECT * FROM oauth_grants WHERE device_public_id=$1 AND client_id=$2 AND revoked_at IS NULL", [devicePublicId, clientId])).rows[0];
   await updateOAuthDiagnostics(context.database, devicePublicId, { stage: grant ? "grant_reuse_checked" : "grant_creation_required", grantFound: Boolean(grant) });
+  logOAuthRequest("info", "oauth_authorize_accepted", request, { ...baseDiagnostics, requestedScopes: requested, validationFailureReason: undefined });
   if (grant && requested.every((scope) => (grant.scopes as string[]).includes(scope))) {
     const code = await createAuthorizationCode(context, { devicePublicId, clientId, redirectUri, scopes: requested, codeChallenge, sessionId: `reuse-${randomToken(18)}` });
     return redirectWithCode(response, redirectUri, state, code);
@@ -279,21 +346,26 @@ async function createAuthorizationCode(context: RouteContext, input: { devicePub
 }
 
 async function exchangeToken(request: IncomingMessage, response: ServerResponse, context: RouteContext) {
-  const form = await readForm(request);
-  if (form.get("grant_type") === "authorization_code") return exchangeAuthorizationCode(response, context, form);
-  if (form.get("grant_type") === "refresh_token") return exchangeRefreshToken(response, context, form);
+  const form = await readFormOrJson(request);
+  logOAuthRequest("info", "oauth_token_request", request, tokenDiagnostics(form));
+  if (form.get("grant_type") === "authorization_code") return exchangeAuthorizationCode(request, response, context, form);
+  if (form.get("grant_type") === "refresh_token") return exchangeRefreshToken(request, response, context, form);
+  logOAuthRequest("warn", "oauth_token_rejected", request, { ...tokenDiagnostics(form), validationFailureReason: "unsupported_grant_type" });
   sendOAuthError(response, 400, "unsupported_grant_type", "Unsupported grant type.");
 }
 
-async function exchangeAuthorizationCode(response: ServerResponse, context: RouteContext, form: URLSearchParams) {
+async function exchangeAuthorizationCode(request: IncomingMessage, response: ServerResponse, context: RouteContext, form: URLSearchParams) {
   const code = form.get("code") ?? "";
-  const clientId = form.get("client_id") ?? "";
+  const clientCredentials = extractClientCredentials(request, form);
+  const clientId = clientCredentials.clientId;
   const redirectUri = form.get("redirect_uri") ?? "";
   const verifier = form.get("code_verifier") ?? "";
   const client = await context.database.connect();
   let devicePublicId: string | undefined;
   try {
     await client.query("BEGIN");
+    const oauthClient = (await client.query("SELECT * FROM oauth_clients WHERE client_id=$1", [clientId])).rows[0] as OAuthClientRow | undefined;
+    if (!oauthClient || !validateTokenClientAuth(oauthClient, clientCredentials.secret, context.config.tokenSecret)) throw new Error("invalid_client");
     const row = (await client.query("SELECT * FROM authorization_codes WHERE code_hash=$1 FOR UPDATE", [hashSecret(code, context.config.tokenSecret)])).rows[0];
     if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now() || row.client_id !== clientId || row.redirect_uri !== redirectUri || !verifyPkceS256(verifier, row.code_challenge)) throw new Error("invalid_grant");
     devicePublicId = row.device_public_id;
@@ -312,21 +384,24 @@ async function exchangeAuthorizationCode(response: ServerResponse, context: Rout
     await client.query("ROLLBACK");
     log("warn", "oauth_authorization_code_rejected", { reason: safeOAuthReason(error), clientIdSuffix: clientId.slice(-6) });
     if (devicePublicId) void updateOAuthDiagnostics(context.database, devicePublicId, { stage: "authorization_code_rejected", tokenError: "invalid_grant" }).catch(() => undefined);
-    sendOAuthError(response, 400, "invalid_grant", "Invalid or expired authorization code.");
+    const reason = error instanceof Error && error.message === "invalid_client" ? "invalid_client" : "invalid_grant";
+    sendOAuthError(response, reason === "invalid_client" ? 401 : 400, reason, reason === "invalid_client" ? "Client authentication failed." : "Invalid or expired authorization code.");
   } finally { client.release(); }
 }
 
-async function exchangeRefreshToken(response: ServerResponse, context: RouteContext, form: URLSearchParams) {
+async function exchangeRefreshToken(request: IncomingMessage, response: ServerResponse, context: RouteContext, form: URLSearchParams) {
   const raw = form.get("refresh_token") ?? "";
-  const clientId = form.get("client_id") ?? "";
+  const clientCredentials = extractClientCredentials(request, form);
+  const clientId = clientCredentials.clientId;
   const hash = hashSecret(raw, context.config.tokenSecret);
   const client = await context.database.connect();
   let token: Record<string, any> | undefined;
   try {
     await client.query("BEGIN");
-    token = (await client.query("SELECT r.*,g.device_public_id,g.client_id,g.scopes,g.token_version,g.revoked_at AS grant_revoked_at,d.revoked_at AS device_revoked_at FROM refresh_tokens r JOIN oauth_grants g ON g.grant_id=r.grant_id JOIN relay_devices d ON d.device_public_id=g.device_public_id JOIN oauth_clients c ON c.client_id=g.client_id WHERE r.token_hash=$1 FOR UPDATE", [hash])).rows[0];
+    token = (await client.query("SELECT r.*,g.device_public_id,g.client_id,g.scopes,g.token_version,g.revoked_at AS grant_revoked_at,d.revoked_at AS device_revoked_at,c.token_endpoint_auth_method,c.client_secret_hash FROM refresh_tokens r JOIN oauth_grants g ON g.grant_id=r.grant_id JOIN relay_devices d ON d.device_public_id=g.device_public_id JOIN oauth_clients c ON c.client_id=g.client_id WHERE r.token_hash=$1 FOR UPDATE", [hash])).rows[0];
     if (!token) throw new Error("refresh_token_missing");
     if (clientId && token.client_id !== clientId) throw new Error("client_mismatch");
+    if (!validateTokenClientAuth(token as OAuthClientRow, clientCredentials.secret, context.config.tokenSecret)) throw new Error("invalid_client");
     if (token.revoked_at || token.grant_revoked_at || token.device_revoked_at) throw new Error("grant_revoked");
     if (new Date(token.expires_at).getTime() <= Date.now() || new Date(token.family_expires_at).getTime() <= Date.now()) throw new Error("refresh_token_expired");
     if (token.consumed_at) {
@@ -366,7 +441,8 @@ async function createTokenPair(client: { query: RelayDatabase["query"] }, config
 }
 
 async function revokeToken(request: IncomingMessage, response: ServerResponse, context: RouteContext) {
-  const form = await readForm(request);
+  const form = await readFormOrJson(request);
+  logOAuthRequest("info", "oauth_revoke_request", request, { clientIdPresent: Boolean(form.get("client_id")) });
   const raw = form.get("token") ?? "";
   const hash = hashSecret(raw, context.config.tokenSecret);
   const row = (await context.database.query("SELECT grant_id FROM refresh_tokens WHERE token_hash=$1", [hash])).rows[0];
@@ -382,6 +458,7 @@ async function revokeToken(request: IncomingMessage, response: ServerResponse, c
 
 async function forwardMcp(request: IncomingMessage, response: ServerResponse, context: RouteContext, devicePublicId: string) {
   const token = bearerToken(request);
+  logOAuthRequest("info", "mcp_request_auth", request, { clientIdPresent: false, resource: `${context.config.publicOrigin}/mcp/${devicePublicId}`, codeChallengePresent: false, statePresent: false });
   const audience = `${context.config.publicOrigin}/mcp/${devicePublicId}`;
   const verification = token ? verifyAccessTokenDetailed(token, context.config.signingSecret, Date.now(), { issuer: context.config.publicOrigin, audience }) : { ok: false as const, reason: "missing_token" as const };
   if (!verification.ok) {
@@ -579,6 +656,46 @@ async function getActiveDevice(database: RelayDatabase, devicePublicId: string) 
   return (await database.query("SELECT device_public_id,access_mode FROM relay_devices WHERE device_public_id=$1 AND revoked_at IS NULL", [devicePublicId])).rows[0] as { device_public_id: string; access_mode: AccessMode } | undefined;
 }
 
+async function resolveAuthorizeResource(database: RelayDatabase, publicOrigin: string, resource: string): Promise<{ ok: true; devicePublicId: string } | { ok: false; reason: string }> {
+  if (!resource) return singleActiveDevice(database, "resource_missing");
+  let resourceUrl: URL;
+  try { resourceUrl = new URL(resource); }
+  catch { return { ok: false, reason: "resource_not_url" }; }
+  if (resourceUrl.origin !== publicOrigin || resourceUrl.username || resourceUrl.password || resourceUrl.search || resourceUrl.hash) return { ok: false, reason: "resource_origin_mismatch" };
+  const mcpMatch = resourceUrl.pathname.match(/^\/mcp\/([A-Za-z0-9_-]{24,128})$/);
+  if (mcpMatch) return { ok: true, devicePublicId: mcpMatch[1] };
+  const metadataMatch = resourceUrl.pathname.match(/^\/\.well-known\/oauth-protected-resource\/mcp\/([A-Za-z0-9_-]{24,128})$/);
+  if (metadataMatch) return { ok: true, devicePublicId: metadataMatch[1] };
+  if (resourceUrl.pathname === "/" || resourceUrl.pathname === "/mcp") return singleActiveDevice(database, "resource_missing_device");
+  return { ok: false, reason: "resource_path_unsupported" };
+}
+
+async function singleActiveDevice(database: RelayDatabase, fallbackReason: string): Promise<{ ok: true; devicePublicId: string } | { ok: false; reason: string }> {
+  const result = await database.query("SELECT device_public_id FROM relay_devices WHERE revoked_at IS NULL ORDER BY last_seen_at DESC LIMIT 2");
+  if (result.rowCount === 1) return { ok: true, devicePublicId: result.rows[0].device_public_id };
+  return { ok: false, reason: result.rowCount ? "ambiguous_resource_device" : fallbackReason };
+}
+
+async function rejectAuthorize(
+  request: IncomingMessage,
+  response: ServerResponse,
+  context: RouteContext,
+  devicePublicId: string | undefined,
+  redirectUri: string,
+  state: string | null,
+  reason: string,
+  description: string,
+  oauthError: string,
+  diagnostics: OAuthRequestDiagnostics,
+) {
+  logOAuthRequest("warn", "oauth_authorize_rejected", request, { ...diagnostics, validationFailureReason: reason });
+  if (devicePublicId) await updateOAuthDiagnostics(context.database, devicePublicId, { stage: "authorize_rejected", tokenError: reason }).catch(() => undefined);
+  if (redirectUri && isSafeRedirectUri(redirectUri, context.config) && (oauthError === "invalid_scope" || oauthError === "access_denied")) {
+    return redirectOAuthError(response, redirectUri, state, oauthError, description);
+  }
+  return sendHtml(response, 400, renderOAuthError(oauthError, description, reason));
+}
+
 function unauthorized(response: ServerResponse, context: RouteContext, devicePublicId: string, reason = "invalid_token") {
   response.setHeader("WWW-Authenticate", `Bearer resource_metadata="${context.config.publicOrigin}/.well-known/oauth-protected-resource/mcp/${devicePublicId}", error="invalid_token"`);
   sendJson(response, 401, { error: "invalid_token", error_description: "The access token is invalid or expired.", reason });
@@ -601,6 +718,54 @@ function requiredScopeForMcpPayload(payload: unknown) {
 function rpcError(id: unknown, code: number, message: string) { return { jsonrpc: "2.0", id, error: { code, message } }; }
 function bearerToken(request: IncomingMessage) { const value = request.headers.authorization; return value?.startsWith("Bearer ") ? value.slice(7) : undefined; }
 function firstHeader(value: string | string[] | undefined) { return Array.isArray(value) ? value[0] : value; }
+function parseScope(value: string | null | undefined) { return (value ?? "").split(/\s+/).map((scope) => scope.trim()).filter(Boolean); }
+function safeRedirectUriParts(value: string) {
+  try { const url = new URL(value); return { host: url.host, path: url.pathname }; }
+  catch { return undefined; }
+}
+function safeResource(value: string | null | undefined) {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch { return "invalid_url"; }
+}
+function authorizeDiagnostics(url: URL): OAuthRequestDiagnostics {
+  return {
+    clientIdPresent: Boolean(url.searchParams.get("client_id")),
+    redirectUri: safeRedirectUriParts(url.searchParams.get("redirect_uri") ?? ""),
+    responseType: url.searchParams.get("response_type") ?? undefined,
+    requestedScopes: parseScope(url.searchParams.get("scope")),
+    codeChallengePresent: Boolean(url.searchParams.get("code_challenge")),
+    codeChallengeMethod: url.searchParams.get("code_challenge_method") ?? undefined,
+    statePresent: url.searchParams.has("state"),
+    resource: safeResource(url.searchParams.get("resource")),
+  };
+}
+function tokenDiagnostics(form: URLSearchParams): OAuthRequestDiagnostics {
+  return {
+    clientIdPresent: Boolean(form.get("client_id")),
+    redirectUri: safeRedirectUriParts(form.get("redirect_uri") ?? ""),
+    requestedScopes: parseScope(form.get("scope")),
+    responseType: form.get("grant_type") ?? undefined,
+    codeChallengePresent: false,
+    statePresent: false,
+  };
+}
+function logOAuthRequest(level: "info" | "warn" | "error", event: string, request: IncomingMessage, diagnostics: OAuthRequestDiagnostics) {
+  log(level, event, {
+    userAgent: firstHeader(request.headers["user-agent"]),
+    clientIdPresent: diagnostics.clientIdPresent,
+    redirectUri: diagnostics.redirectUri,
+    responseType: diagnostics.responseType,
+    requestedScopes: diagnostics.requestedScopes,
+    codeChallengePresent: diagnostics.codeChallengePresent,
+    codeChallengeMethod: diagnostics.codeChallengeMethod,
+    statePresent: diagnostics.statePresent,
+    resource: diagnostics.resource,
+    validationFailureReason: diagnostics.validationFailureReason,
+  });
+}
 function safePath(value: string | undefined) {
   try {
     return new URL(value ?? "/", "http://relay").pathname
@@ -615,11 +780,41 @@ function safePath(value: string | undefined) {
 function safeError(error: unknown) { return error instanceof Error ? error.name : "unknown"; }
 function safeOAuthReason(error: unknown) {
   if (!(error instanceof Error)) return "invalid_grant";
-  return ["invalid_grant", "refresh_token_missing", "client_mismatch", "grant_revoked", "refresh_token_expired"].includes(error.message) ? error.message : "invalid_grant";
+  return ["invalid_grant", "invalid_client", "refresh_token_missing", "client_mismatch", "grant_revoked", "refresh_token_expired"].includes(error.message) ? error.message : "invalid_grant";
 }
 function log(level: "info" | "warn" | "error", event: string, fields: Record<string, unknown> = {}) { process.stdout.write(`${JSON.stringify({ time: new Date().toISOString(), level, event, ...fields })}\n`); }
 function isRecord(value: unknown): value is Record<string, any> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function isSafeRedirectUri(value: unknown) { if (typeof value !== "string") return false; try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash; } catch { return false; } }
+function isSafeRedirectUri(value: unknown, config?: RelayConfig) {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.hash) return false;
+    if (url.protocol === "https:") return true;
+    if (url.protocol !== "http:") return false;
+    if (config?.nodeEnv === "production") return false;
+    return ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  } catch { return false; }
+}
+function normalizeTokenEndpointAuthMethod(value: unknown) {
+  if (value === undefined || value === null || value === "") return "none";
+  return value === "none" || value === "client_secret_post" || value === "client_secret_basic" ? value : undefined;
+}
+function extractClientCredentials(request: IncomingMessage, form: URLSearchParams) {
+  const basic = firstHeader(request.headers.authorization);
+  if (basic?.startsWith("Basic ")) {
+    try {
+      const decoded = Buffer.from(basic.slice(6), "base64").toString("utf8");
+      const separator = decoded.indexOf(":");
+      if (separator >= 0) return { clientId: decodeURIComponent(decoded.slice(0, separator)), secret: decodeURIComponent(decoded.slice(separator + 1)), method: "client_secret_basic" };
+    } catch {}
+  }
+  return { clientId: form.get("client_id") ?? "", secret: form.get("client_secret") ?? "", method: form.get("client_secret") ? "client_secret_post" : "none" };
+}
+function validateTokenClientAuth(client: OAuthClientRow, secret: string | undefined, tokenSecret: string) {
+  const method = client.token_endpoint_auth_method ?? "none";
+  if (method === "none") return true;
+  return Boolean(secret && client.client_secret_hash && safeHashEqual(secret, client.client_secret_hash, tokenSecret));
+}
 
 async function readBody(request: IncomingMessage) {
   const chunks: Buffer[] = []; let size = 0;
@@ -628,12 +823,26 @@ async function readBody(request: IncomingMessage) {
 }
 async function readJson(request: IncomingMessage) { const body = await readBody(request); try { return JSON.parse(body || "{}"); } catch { throw new Error("invalid_json"); } }
 async function readForm(request: IncomingMessage) { return new URLSearchParams(await readBody(request)); }
+async function readFormOrJson(request: IncomingMessage) {
+  const body = await readBody(request);
+  const contentType = firstHeader(request.headers["content-type"]) ?? "";
+  if (contentType.toLowerCase().includes("application/json")) {
+    try {
+      const parsed = JSON.parse(body || "{}");
+      const form = new URLSearchParams();
+      if (isRecord(parsed)) for (const [key, value] of Object.entries(parsed)) if (typeof value === "string") form.set(key, value);
+      return form;
+    } catch { throw new Error("invalid_json"); }
+  }
+  return new URLSearchParams(body);
+}
 function sendJson(response: ServerResponse, status: number, value: unknown) { response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(value)); }
 function sendHtml(response: ServerResponse, status: number, value: string) { response.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'" }).end(value); }
 function sendOAuthError(response: ServerResponse, status: number, error: string, description: string) { sendJson(response, status, { error, error_description: description }); }
-function redirectOAuthError(response: ServerResponse, redirectUri: string, state: string | null, error: string) { response.writeHead(302, { Location: oauthRedirect(redirectUri, state, { error }) }).end(); }
+function redirectOAuthError(response: ServerResponse, redirectUri: string, state: string | null, error: string, description?: string) { response.writeHead(302, { Location: oauthRedirect(redirectUri, state, { error, ...(description ? { error_description: description } : {}) }) }).end(); }
 function redirectWithCode(response: ServerResponse, redirectUri: string, state: string | null, code: string) { response.writeHead(302, { Location: oauthRedirect(redirectUri, state, { code }) }).end(); }
 function oauthRedirect(redirectUri: string, state: string | null, values: Record<string, string>) { const url = new URL(redirectUri); for (const [key, value] of Object.entries(values)) url.searchParams.set(key, value); if (state) url.searchParams.set("state", state); return url.href; }
+function renderOAuthError(error: string, description: string, reason: string) { return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Aevum Connect OAuth error</title><style>${pageStyle()}</style><main><h1>Could not connect Aevum</h1><p>${escapeHtml(description)}</p><p>OAuth error: ${escapeHtml(error)}</p><p>Diagnostic reason: ${escapeHtml(reason)}</p></main>`; }
 function renderConsent(input: { sessionId: string; clientName: string; scopes: string[]; action: string }) { const permission = input.scopes.includes("mcp:write") ? "Full Access productivity tools (writes still require confirmation in Aevum)." : input.scopes.includes("mcp:propose") ? "Read data and create proposals." : "Read sanitized Aevum data."; return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Authorize Aevum Connect</title><style>${pageStyle()}</style><main><h1>Connect ${escapeHtml(input.clientName)}?</h1><p>${escapeHtml(permission)}</p><p>Requested scopes: ${escapeHtml(input.scopes.join(" "))}</p><form method="post" action="${escapeHtml(input.action)}"><input type="hidden" name="consent_id" value="${escapeHtml(input.sessionId)}"><button name="decision" value="deny">Deny</button><button class="primary" name="decision" value="approve">Continue in Aevum</button></form></main>`; }
 function renderWaiting(statusUrl: string) { const endpoint = JSON.stringify(statusUrl).replace(/</g, "\\u003c"); return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Waiting for Aevum</title><style>${pageStyle()}</style><main><h1>Approve in Aevum</h1><p id="status">Waiting for the desktop app…</p></main><script>const u=${endpoint},s=document.getElementById('status');async function p(){try{const r=await fetch(u,{cache:'no-store'}),d=await r.json();if(d.redirectUrl)return location.replace(d.redirectUrl);if(d.error)return s.textContent=d.error}catch{}setTimeout(p,750)}p()</script>`; }
 function pageStyle() { return `body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0e0e11;color:#f4f1ea;font:15px system-ui}main{width:min(440px,calc(100% - 48px));padding:28px;border:1px solid #34343d;border-radius:18px;background:#19191e}h1{font-size:22px}p{color:#bbb7ae;line-height:1.5}form{display:flex;gap:10px;margin-top:22px}button{flex:1;padding:11px;border:0;border-radius:10px;background:#303038;color:#eee;font-weight:650}.primary{background:#d7b56d;color:#17130b}`; }

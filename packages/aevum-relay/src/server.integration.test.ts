@@ -119,6 +119,87 @@ describe("Relay OAuth integration", () => {
     expect(device.approvalCount).toBe(2);
     cleanups.push(async () => { device.close(); relay.hub.close(); await close(relay.server); await database.end(); });
   });
+
+  it("accepts ChatGPT, Claude, Grok, and generic MCP OAuth request variants", async () => {
+    const memory = newDb({ autoCreateForeignKeyIndices: true });
+    const adapter = memory.adapters.createPg();
+    const database = new adapter.Pool() as unknown as RelayDatabase;
+    await migrateDatabase(database);
+    const port = await freePort();
+    const config = relayConfig(port);
+    const relay = createRelayServer(config, database);
+    await listen(relay.server, port);
+    const device = new TestDevice(config.publicOrigin, "full-access");
+    await device.connect();
+
+    const authorizationMetadata = await fetch(`${config.publicOrigin}/.well-known/oauth-authorization-server`).then((response) => response.json()) as Record<string, unknown>;
+    expect(authorizationMetadata).toMatchObject({
+      issuer: config.publicOrigin,
+      authorization_endpoint: `${config.publicOrigin}/authorize`,
+      token_endpoint: `${config.publicOrigin}/token`,
+      registration_endpoint: `${config.publicOrigin}/register`,
+      revocation_endpoint: `${config.publicOrigin}/revoke`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
+      code_challenge_methods_supported: ["S256"],
+      scopes_supported: ["mcp:read", "mcp:propose", "mcp:write"],
+    });
+    const protectedMetadata = await fetch(`${config.publicOrigin}/.well-known/oauth-protected-resource/mcp/${device.devicePublicId}`).then((response) => response.json()) as Record<string, unknown>;
+    expect(protectedMetadata).toMatchObject({
+      resource: `${config.publicOrigin}/mcp/${device.devicePublicId}`,
+      authorization_servers: [config.publicOrigin],
+      scopes_supported: ["mcp:read", "mcp:propose", "mcp:write"],
+    });
+
+    const chatgpt = await authorize(config.publicOrigin, device.devicePublicId, ["mcp:read", "mcp:propose", "mcp:write"], {
+      registerBody: { software_id: "chatgpt-test", jwks_uri: "https://chatgpt.com/jwks.json" },
+      extraAuthorizeParams: { prompt: "consent" },
+    });
+    expect(chatgpt.tokens.scope).toBe("mcp:read mcp:propose mcp:write");
+    expect((await rpc(config.publicOrigin, device.devicePublicId, chatgpt.tokens.access_token, "tools/call", "create_tasks")).status).toBe(200);
+
+    const claude = await authorize(config.publicOrigin, device.devicePublicId, ["mcp:read", "mcp:propose"], {
+      clientName: "Claude",
+      resource: `${config.publicOrigin}/.well-known/oauth-protected-resource/mcp/${device.devicePublicId}`,
+      tokenContentType: "json",
+    });
+    expect(claude.tokens.scope).toBe("mcp:read mcp:propose");
+    const claudeWrite = await rpc(config.publicOrigin, device.devicePublicId, claude.tokens.access_token, "tools/call", "delete_task");
+    expect(claudeWrite.status).toBe(403);
+    expect(await claudeWrite.json()).toMatchObject({ error: "insufficient_scope" });
+
+    const grok = await authorize(config.publicOrigin, device.devicePublicId, [], {
+      clientName: "Grok",
+      includeScope: false,
+      resource: config.publicOrigin,
+      extraAuthorizeParams: { audience: `${config.publicOrigin}/mcp/${device.devicePublicId}`, provider_hint: "grok" },
+    });
+    expect(grok.tokens.scope).toBe("mcp:read mcp:propose mcp:write");
+
+    const generic = await authorize(config.publicOrigin, device.devicePublicId, ["mcp:read"], {
+      clientName: "Generic MCP",
+      resource: `${config.publicOrigin}/mcp/${device.devicePublicId}`,
+      registerBody: { contacts: ["ops@example.com"], scope: "mcp:read" },
+    });
+    expect(generic.tokens.scope).toBe("mcp:read");
+    const refreshed = await refresh(config.publicOrigin, generic.clientId, generic.tokens.refresh_token);
+    expect(refreshed.response.status).toBe(200);
+    expect(refreshed.tokens.scope).toBe("mcp:read");
+
+    const invalid = await startAuthorization(config.publicOrigin, device.devicePublicId, {
+      clientName: "Invalid Grok",
+      scopes: ["mcp:read"],
+      resource: `${config.publicOrigin}/mcp/${device.devicePublicId}`,
+      codeChallengeMethod: "plain",
+    });
+    expect(invalid.consent.status).toBe(400);
+    expect(invalid.consent.headers.get("content-type")).toContain("text/html");
+    const invalidBody = await invalid.consent.text();
+    expect(invalidBody).toContain("pkce_method_missing_or_unsupported");
+    expect(invalidBody).not.toContain("The authorization request is invalid.");
+
+    cleanups.push(async () => { device.close(); relay.hub.close(); await close(relay.server); await database.end(); });
+  });
 });
 
 class TestDevice {
@@ -148,14 +229,46 @@ class TestDevice {
   close() { this.socket?.close(); this.socket = undefined; }
 }
 
-async function authorize(origin: string, devicePublicId: string, scopes: string[]) {
-  const redirectUri = "https://chatgpt.com/connector_platform_oauth_redirect";
-  const registered = await fetch(`${origin}/register`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client_name: "ChatGPT", redirect_uris: [redirectUri] }) });
+type AuthorizeOptions = {
+  clientName?: string;
+  redirectUri?: string;
+  resource?: string;
+  scopes?: string[];
+  includeScope?: boolean;
+  registerBody?: Record<string, unknown>;
+  extraAuthorizeParams?: Record<string, string>;
+  codeChallengeMethod?: string;
+  tokenContentType?: "form" | "json";
+};
+
+async function startAuthorization(origin: string, devicePublicId: string, options: AuthorizeOptions = {}) {
+  const redirectUri = options.redirectUri ?? "https://chatgpt.com/connector_platform_oauth_redirect";
+  const registered = await fetch(`${origin}/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_name: options.clientName ?? "ChatGPT", redirect_uris: [redirectUri], ...options.registerBody }),
+  });
+  expect(registered.status).toBe(201);
   const client = await registered.json() as { client_id: string };
   const verifier = randomBytes(48).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
-  const query = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: redirectUri, resource: `${origin}/mcp/${devicePublicId}`, scope: scopes.join(" "), state: "state", code_challenge: challenge, code_challenge_method: "S256" });
+  const query = new URLSearchParams({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: redirectUri,
+    resource: options.resource ?? `${origin}/mcp/${devicePublicId}`,
+    state: "state",
+    code_challenge: challenge,
+    code_challenge_method: options.codeChallengeMethod ?? "S256",
+    ...options.extraAuthorizeParams,
+  });
+  if (options.includeScope !== false) query.set("scope", (options.scopes ?? []).join(" "));
   const consent = await fetch(`${origin}/authorize?${query}`);
+  return { client, verifier, redirectUri, consent };
+}
+
+async function authorize(origin: string, devicePublicId: string, scopes: string[], options: AuthorizeOptions = {}) {
+  const { client, verifier, redirectUri, consent } = await startAuthorization(origin, devicePublicId, { ...options, scopes });
   const html = await consent.text();
   const consentId = html.match(/name="consent_id" value="([^"]+)"/)?.[1];
   expect(consentId).toBeTruthy();
@@ -167,7 +280,10 @@ async function authorize(origin: string, devicePublicId: string, scopes: string[
     redirectUrl = status.redirectUrl ?? "";
   }
   const code = new URL(redirectUrl).searchParams.get("code");
-  const response = await fetch(`${origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: client.client_id, redirect_uri: redirectUri, code: code!, code_verifier: verifier }) });
+  const tokenBody = { grant_type: "authorization_code", client_id: client.client_id, redirect_uri: redirectUri, code: code!, code_verifier: verifier };
+  const response = options.tokenContentType === "json"
+    ? await fetch(`${origin}/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tokenBody) })
+    : await fetch(`${origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(tokenBody) });
   expect(response.status).toBe(200);
   return { clientId: client.client_id, tokens: await response.json() as TokenResponse };
 }
